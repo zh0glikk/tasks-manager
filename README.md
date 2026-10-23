@@ -22,22 +22,27 @@ docker compose up -d db
 DATABASE_URL=postgres://tasks:tasks@localhost:5432/tasks?sslmode=disable go run ./cmd/server
 ```
 
-## Деплой на DigitalOcean App Platform
+## Деплой: DigitalOcean App Platform + Neon
 
-Специфікація лежить у `.do/app.yaml`: сервіс із `Dockerfile` (1 vCPU / 512 МБ, $5/міс), dev-база PostgreSQL
-($7/міс), регіон Франкфурт, автодеплой на push у `main`.
+Застосунок працює на App Platform (`.do/app.yaml`: сервіс із `Dockerfile`, 1 vCPU / 512 МБ, $5/міс, Франкфурт,
+автодеплой на push у `main`). База — безкоштовний Postgres у [Neon](https://neon.tech).
 
-1. DigitalOcean → **Apps → Create App** → GitHub → дати доступ до `zh0glikk/tasks-manager`, гілка `main`.
-2. Звичайне створення з GitHub **не** читає `.do/app.yaml` само. Тож або на кроці налаштувань, або вже після
-   створення (App → Settings → App Spec → Edit) встав вміст `.do/app.yaml`. Це додасть dev-базу `db` і змінну
-   `DATABASE_URL=${db.DATABASE_URL}`. Без неї сервер падає з `DATABASE_URL is required`.
-3. Save / Create Resources → через кілька хвилин застосунок буде доступний на `https://tasks-manager-xxxxx.ondigitalocean.app`.
+Чому не dev-база DigitalOcean: її користувач не має права створювати таблиці (`permission denied for schema public`)
+і навіть власну схему (`permission denied for database`), тож міграції не проходять.
 
-Альтернатива через CLI: `doctl apps create --spec .do/app.yaml`.
+**База (Neon):**
+1. [console.neon.tech](https://console.neon.tech) → Create project, регіон **AWS Europe Central 1 (Frankfurt)**.
+2. Connect → **вимкнути Connection pooling** (пряме підключення) → скопіювати рядок
+   `postgresql://…neon.tech/neondb?sslmode=require`.
+
+**Застосунок (DigitalOcean):**
+1. Apps → Create App → GitHub → `zh0glikk/tasks-manager`, гілка `main`.
+2. Settings → App Spec → Edit → вставити `.do/app.yaml`, підставивши свій рядок Neon у `DATABASE_URL`
+   (`type: SECRET`, тому DO зберігає його зашифрованим). Створення з GitHub не читає `.do/app.yaml` само.
+3. Save → після деплою в Runtime Logs має бути `migrations applied`.
 
 Міграції запускаються у фоні з повторами: сервер і `/healthz` піднімаються одразу, а `/api/*` відповідає 503, доки
-міграції не застосуються. Так зроблено тому, що dev-база DigitalOcean видає права на схему `public` тільки після
-першого успішного деплою.
+міграції не застосуються. Якщо в базі немає права писати в `public`, сервер пробує створити й використовувати схему `app`.
 
 Свій домен: App → Settings → Domains.
 

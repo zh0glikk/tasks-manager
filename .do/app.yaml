@@ -1,6 +1,6 @@
-# DigitalOcean App Platform spec.
-# Create: Apps → Create App → GitHub → zh0glikk/tasks-manager (it picks this file up),
-# or `doctl apps create --spec .do/app.yaml`.
+# DigitalOcean App Platform spec. Database: Neon (free Postgres), see README.
+# Create App from GitHub, then Settings → App Spec → Edit and paste this,
+# replacing DATABASE_URL with the Neon connection string (direct, not pooled).
 name: tasks-manager
 region: fra
 services:
@@ -20,9 +20,6 @@ services:
       period_seconds: 10
     envs:
       - key: DATABASE_URL
-        value: ${db.DATABASE_URL}
         scope: RUN_TIME
-databases:
-  - name: db
-    engine: PG
-    production: false
+        type: SECRET
+        value: postgresql://USER:PASSWORD@HOST.eu-central-1.aws.neon.tech/neondb?sslmode=require
