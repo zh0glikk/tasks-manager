@@ -77,7 +77,12 @@
     });
     let data = null;
     try { data = await res.json(); } catch { /* empty */ }
-    if (!res.ok) throw new Error((data && data.error) || 'Помилка ' + res.status);
+    if (!res.ok) {
+      if (data && data.error) throw new Error(data.error);
+      // the hosting proxy may replace our JSON error with its own HTML page
+      if (res.status === 502 || res.status === 503 || res.status === 504) throw new Error('сервер запускається або недоступний, спробуйте за хвилину');
+      throw new Error('Помилка ' + res.status);
+    }
     return data;
   }
 
