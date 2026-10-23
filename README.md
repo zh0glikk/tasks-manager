@@ -22,15 +22,23 @@ docker compose up -d db
 DATABASE_URL=postgres://tasks:tasks@localhost:5432/tasks?sslmode=disable go run ./cmd/server
 ```
 
-## Деплой на Render
+## Деплой на DigitalOcean App Platform
 
-1. Render → **New → Blueprint** → вибрати цей репозиторій.
-2. Render прочитає `render.yaml` і створить web-сервіс `tasks-manager` та Postgres `tasks-manager-db`.
-   `DATABASE_URL` підставиться автоматично.
-3. Кожен push у `main` деплоїться сам.
+Специфікація лежить у `.do/app.yaml`: сервіс із `Dockerfile` (1 vCPU / 512 МБ, $5/міс), dev-база PostgreSQL
+($7/міс), регіон Франкфурт, автодеплой на push у `main`.
 
-Обмеження безкоштовного плану Render: сервіс засинає після ~15 хв без запитів (перший запит після цього йде ~30–60 с),
-а безкоштовна база видаляється через 30 днів, якщо не перейти на платний план.
+1. DigitalOcean → **Apps → Create App** → GitHub → дати доступ до `zh0glikk/tasks-manager`, гілка `main`.
+2. DO знайде `.do/app.yaml` і підставить усе з нього: сервіс `web`, базу `db` і `DATABASE_URL`.
+   Якщо цього не сталося, на кроці налаштувань відкрий **Edit App Spec** і встав вміст файлу.
+3. Create Resources → через кілька хвилин застосунок буде доступний на `https://tasks-manager-xxxxx.ondigitalocean.app`.
+
+Альтернатива через CLI: `doctl apps create --spec .do/app.yaml`.
+
+Міграції запускаються у фоні з повторами: сервер і `/healthz` піднімаються одразу, а `/api/*` відповідає 503, доки
+міграції не застосуються. Так зроблено тому, що dev-база DigitalOcean видає права на схему `public` тільки після
+першого успішного деплою.
+
+Свій домен: App → Settings → Domains.
 
 ## Структура
 

@@ -13,16 +13,10 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
+// Connect builds the pool without dialing; the first query (Migrate) surfaces
+// connection errors and is retried by the caller.
 func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, err
-	}
-	return pool, nil
+	return pgxpool.New(ctx, url)
 }
 
 // Migrate applies embedded migrations in filename order, each in its own transaction.
