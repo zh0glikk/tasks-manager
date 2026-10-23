@@ -62,6 +62,7 @@
     month: new Date(now.getFullYear(), now.getMonth(), 1),
     sel: today(),
     off: new Set(store.get('hiddenCourses', [])),
+    protected: false,
   };
 
   const courseOf = (id) => state.courses.find((c) => c.id === id) || GENERAL;
@@ -69,15 +70,31 @@
   const visible = (courseId) => courseId == null || !state.off.has(courseId);
 
   // ---- api ----
+  // ---- edit code ----
+  const editCode = () => store.get('editCode', '');
+  const validCode = (c) => /^[\x21-\x7e]+$/.test(c); // header-safe ASCII
+
+  // ensureCode asks for the group code once when the server requires it.
+  function ensureCode() {
+    if (!state.protected || editCode()) return true;
+    const c = (prompt('Код групи для редагування (спитай у чаті групи):') || '').trim();
+    if (!c) return false;
+    store.set('editCode', c);
+    return true;
+  }
+
   async function api(method, path, body) {
-    const res = await fetch(path, {
-      method,
-      headers: body ? { 'Content-Type': 'application/json' } : {},
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const headers = body ? { 'Content-Type': 'application/json' } : {};
+    if (method !== 'GET' && validCode(editCode())) headers['X-Edit-Code'] = editCode();
+    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
     let data = null;
     try { data = await res.json(); } catch { /* empty */ }
     if (!res.ok) {
+      if (data && data.code_required) {
+        store.set('editCode', '');
+        state.protected = true;
+        throw new Error('Неправильний код групи. Перевір його й спробуй ще раз.');
+      }
       if (data && data.error) throw new Error(data.error);
       // the hosting proxy may replace our JSON error with its own HTML page
       if (res.status === 502 || res.status === 503 || res.status === 504) throw new Error('сервер запускається або недоступний, спробуйте за хвилину');
@@ -104,10 +121,11 @@
   }
   async function loadPosts() { state.posts = await api('GET', '/api/posts?limit=30'); }
   async function loadCourses() { state.courses = await api('GET', '/api/courses'); }
+  async function loadConfig() { state.protected = (await api('GET', '/api/config')).edit_protected; }
 
   async function reload() {
     try {
-      await Promise.all([loadCourses(), loadMonth(), loadUpcoming(), loadPosts()]);
+      await Promise.all([loadConfig(), loadCourses(), loadMonth(), loadUpcoming(), loadPosts()]);
     } catch (e) {
       toast('Не вдалося завантажити: ' + e.message, true);
     }
@@ -349,7 +367,8 @@
       `<button type="button" class="tab" role="tab" data-tab="${k}" aria-selected="${k === type}">${v.tab}</button>`).join('');
     const v = Object.assign({ course_id: state.courses[0] ? state.courses[0].id : null }, preset, item || {});
     $('#fields').innerHTML = fieldsFor(type, v, !item) +
-      input('author', 'Ваше ім’я', store.get('author', ''), 'maxlength="60" autocomplete="name"', 'Запам’ятаємо в цьому браузері. Видно в журналі змін.');
+      input('author', 'Ваше ім’я', store.get('author', ''), 'maxlength="60" autocomplete="name"', 'Запам’ятаємо в цьому браузері. Видно в журналі змін.') +
+      (state.protected ? input('edit_code', 'Код групи', editCode(), 'required autocomplete="off" spellcheck="false" autocapitalize="none"', 'Потрібен для змін. Спитай у чаті групи — запам’ятаємо в цьому браузері.') : '');
   }
 
   function collectForm() {
@@ -378,6 +397,13 @@
     body.author = author;
     store.set('author', author);
     if (form.type === 'event' && body.repeat_until === '') return showFormError('Вкажіть, до якої дати повторювати');
+    const codeEl = $('#form').elements.edit_code;
+    if (codeEl) {
+      const c = codeEl.value.trim();
+      if (!c) return showFormError('Вкажіть код групи');
+      if (!validCode(c)) return showFormError('Код групи — латиниця, цифри і дефіси');
+      store.set('editCode', c);
+    }
 
     const t = TYPES[form.type], btn = $('#form-submit');
     btn.disabled = true;
@@ -413,6 +439,7 @@
     const item = findItem(type, id);
     const label = item ? (item.title || item.name || item.kind) : '';
     if (!confirm(`Видалити «${label}»?\nЦе можна повернути в журналі змін.`)) return;
+    if (!ensureCode()) return;
     try {
       await api('DELETE', `${TYPES[type].path}/${id}`, { author: store.get('author', '') });
       toast('Видалено — можна повернути в журналі змін');
@@ -461,6 +488,7 @@
   }
 
   async function revert(id, btn) {
+    if (!ensureCode()) return;
     btn.disabled = true;
     try {
       await api('POST', `/api/changes/${id}/revert`, { author: store.get('author', '') });
