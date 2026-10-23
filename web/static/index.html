@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Е2 Екологія · що на коли</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,600;7..72,700&family=Golos+Text:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230E5D69'/%3E%3Cpath d='M9 7v18M9 8h13l-3 5 3 5H9' stroke='white' stroke-width='3' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <span class="eyebrow">ХНУ ім. Каразіна · аспірантура</span>
+      <h1>Е2 Екологія · що на коли</h1>
+    </div>
+    <div class="top-actions">
+      <button type="button" class="btn" id="btn-history">
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+        Журнал змін
+      </button>
+      <button type="button" class="btn primary" id="btn-add">
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        Додати
+      </button>
+    </div>
+  </header>
+
+  <section aria-labelledby="dl-h" class="stack">
+    <div class="sec-head">
+      <h2 id="dl-h">Найближчі дедлайни</h2>
+      <span class="muted" id="dl-count"></span>
+    </div>
+    <div class="upcoming" id="upcoming"></div>
+  </section>
+
+  <div class="layout">
+    <main class="stack">
+      <div class="cal-bar">
+        <div class="month-nav">
+          <button type="button" class="icon-btn" id="prev" aria-label="Попередній місяць"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+          <h2 id="month-title"></h2>
+          <button type="button" class="icon-btn" id="next" aria-label="Наступний місяць"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+          <button type="button" class="btn small" id="today-btn">Сьогодні</button>
+        </div>
+        <div class="chips" id="chips" role="group" aria-label="Фільтр за предметом"></div>
+      </div>
+      <div class="cal">
+        <div class="wdrow" id="wdrow"></div>
+        <div class="grid" id="grid"></div>
+      </div>
+      <section class="panel" id="day" aria-live="polite"></section>
+    </main>
+
+    <aside class="stack" aria-labelledby="news-h">
+      <div class="sec-head between">
+        <h2 id="news-h">Новини</h2>
+        <button type="button" class="link-btn" id="btn-add-post">+ написати</button>
+      </div>
+      <div class="stack" id="news"></div>
+    </aside>
+  </div>
+
+  <section aria-labelledby="courses-h" class="stack">
+    <div class="sec-head between">
+      <h2 id="courses-h">Предмети</h2>
+      <button type="button" class="link-btn" id="btn-add-course">+ предмет</button>
+    </div>
+    <div class="courses" id="courses"></div>
+  </section>
+</div>
+
+<dialog id="form-dialog" aria-labelledby="form-title">
+  <form id="form" method="dialog" novalidate>
+    <div class="dlg-head">
+      <h2 id="form-title">Додати</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Тип запису"></div>
+    <div class="fields" id="fields"></div>
+    <p class="form-error" id="form-error" role="alert" hidden></p>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>Скасувати</button>
+      <button type="submit" class="btn primary" id="form-submit">Зберегти</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="history-dialog" aria-labelledby="history-title" class="wide">
+  <div class="dlg-head">
+    <div>
+      <h2 id="history-title">Журнал змін</h2>
+      <p class="muted">Редагувати може кожен — тут видно, хто і що змінив, і можна повернути</p>
+    </div>
+    <button type="button" class="icon-btn" data-close aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <ol class="history" id="history"></ol>
+</dialog>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
