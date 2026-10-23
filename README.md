@@ -28,9 +28,10 @@ DATABASE_URL=postgres://tasks:tasks@localhost:5432/tasks?sslmode=disable go run 
 ($7/міс), регіон Франкфурт, автодеплой на push у `main`.
 
 1. DigitalOcean → **Apps → Create App** → GitHub → дати доступ до `zh0glikk/tasks-manager`, гілка `main`.
-2. DO знайде `.do/app.yaml` і підставить усе з нього: сервіс `web`, базу `db` і `DATABASE_URL`.
-   Якщо цього не сталося, на кроці налаштувань відкрий **Edit App Spec** і встав вміст файлу.
-3. Create Resources → через кілька хвилин застосунок буде доступний на `https://tasks-manager-xxxxx.ondigitalocean.app`.
+2. Звичайне створення з GitHub **не** читає `.do/app.yaml` само. Тож або на кроці налаштувань, або вже після
+   створення (App → Settings → App Spec → Edit) встав вміст `.do/app.yaml`. Це додасть dev-базу `db` і змінну
+   `DATABASE_URL=${db.DATABASE_URL}`. Без неї сервер падає з `DATABASE_URL is required`.
+3. Save / Create Resources → через кілька хвилин застосунок буде доступний на `https://tasks-manager-xxxxx.ondigitalocean.app`.
 
 Альтернатива через CLI: `doctl apps create --spec .do/app.yaml`.
 
