@@ -95,6 +95,7 @@ h2 { font-family: var(--serif); font-size: 19px; font-weight: 700; }
 .pill.tent { opacity: .75; }
 .pill b { font-family: var(--mono); font-size: 10px; font-weight: 600; }
 .more { font-size: 11px; color: var(--ink-3); padding-left: 2px; }
+.m-only { display: none; }
 
 /* day panel */
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
@@ -168,10 +169,16 @@ dialog form { display: flex; flex-direction: column; gap: 16px; }
   h1 { font-size: 21px; }
   .top-actions { width: 100%; }
   .top-actions .btn { flex: 1; justify-content: center; }
-  .cell { min-height: 58px; padding: 4px; gap: 3px; }
-  .pill, .tag-due { font-size: 0; padding: 0; height: 6px; border-radius: 3px; box-shadow: none; }
-  .pill { background: var(--c); }
-  .tag-due svg, .pill b, .more { display: none; }
+  /* phone: cells are ~50px wide, so show start times only; names stay in the day panel */
+  .cell { min-height: 64px; padding: 3px 2px; gap: 2px; }
+  .pill, .tag-due { padding: 1px 2px 1px 4px; font-size: 10px; line-height: 1.35; text-overflow: clip; letter-spacing: -.02em; }
+  .pill { box-shadow: inset 2px 0 0 var(--c); }
+  .pill b { font-size: 10px; }
+  .pill .pn, .tag-due svg, .d-only { display: none; }
+  .m-only { display: inline; }
+  .tag-due { padding-left: 3px; }
+  .more { font-size: 10px; padding-left: 2px; }
+  .dnum { font-size: 11px; }
   .month-nav h2 { min-width: 0; font-size: 17px; }
   .item { grid-template-columns: 1fr auto; }
   .item .t { grid-column: 1 / -1; }

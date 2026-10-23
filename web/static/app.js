@@ -168,12 +168,12 @@
         (dls.length ? ', дедлайнів: ' + dls.length : '') + (evs.length ? ', занять: ' + evs.length : '');
       const pills = evs.slice(0, Math.max(0, MAX_PILLS - dls.length)).map((e) => {
         const c = courseOf(e.course_id);
-        return `<span class="pill${e.tentative ? ' tent' : ''}" style="${cvars(c)}"><b>${esc(e.start_time)}</b> ${esc(c.short)}</span>`;
+        return `<span class="pill${e.tentative ? ' tent' : ''}" style="${cvars(c)}"><b>${esc(e.start_time)}</b><span class="pn"> ${esc(c.short)}</span></span>`;
       }).join('');
       const hidden = evs.length - Math.max(0, MAX_PILLS - dls.length);
       html += `<button type="button" class="${cls.join(' ')}" data-day="${k}" aria-label="${esc(aria)}">
         <span class="dnum">${d.getDate()}</span>
-        ${dls.map((a) => `<span class="tag-due"><svg width="10" height="10" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v18M5 4h12l-2 4 2 4H5"/></svg>${esc(a.title)}</span>`).join('')}
+        ${dls.map((a) => `<span class="tag-due"><svg width="10" height="10" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v18M5 4h12l-2 4 2 4H5"/></svg><span class="d-only">${esc(a.title)}</span><span class="m-only">ДЗ${a.due_time ? ' ' + esc(a.due_time) : ''}</span></span>`).join('')}
         ${pills}${hidden > 0 ? `<span class="more">+${hidden}</span>` : ''}
       </button>`;
     }
