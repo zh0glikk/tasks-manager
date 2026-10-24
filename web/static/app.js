@@ -62,43 +62,64 @@
     month: new Date(now.getFullYear(), now.getMonth(), 1),
     sel: today(),
     off: new Set(store.get('hiddenCourses', [])),
-    protected: false,
+    authRequired: true,
+    me: null, // {name, can_write} when logged in with a bot key
   };
+  const canEdit = () => !state.authRequired || !!(state.me && state.me.can_write);
 
   const courseOf = (id) => state.courses.find((c) => c.id === id) || GENERAL;
   const cvars = (c) => { const col = safeColor(c.color); return `--c:${col};--cs:${col}1f`; };
   const visible = (courseId) => courseId == null || !state.off.has(courseId);
 
-  // ---- api ----
-  // ---- edit code ----
-  const editCode = () => store.get('editCode', '');
-  const validCode = (c) => /^[\x21-\x7e]+$/.test(c); // header-safe ASCII
+  // ---- session (key from the Telegram bot) ----
+  const KEY_RE = /^e2_[a-z2-7]{32}$/;
+  const sessionKey = () => store.get('key', '');
 
-  // ensureCode asks for the group code once when the server requires it.
-  function ensureCode() {
-    if (!state.protected || editCode()) return true;
-    const c = (prompt('Код групи для редагування (спитай у чаті групи):') || '').trim();
-    if (!c) return false;
-    store.set('editCode', c);
-    return true;
+  // the bot sends a login link like /#key=e2_…; the fragment never reaches the server
+  function takeKeyFromURL() {
+    const m = location.hash.match(/key=(e2_[a-z2-7]{32})/);
+    if (!m) return;
+    store.set('key', m[1]);
+    history.replaceState(null, '', location.pathname + location.search);
   }
 
+  async function loadMe() {
+    state.me = null;
+    if (!sessionKey()) return;
+    try {
+      state.me = await api('GET', '/api/me');
+    } catch (e) {
+      if (e.status !== 401) throw e;
+    }
+  }
+
+  function logout() {
+    store.set('key', '');
+    state.me = null;
+    render();
+    toast('Ти вийшов');
+  }
+
+  // ---- api ----
   async function api(method, path, body) {
     const headers = body ? { 'Content-Type': 'application/json' } : {};
-    if (method !== 'GET' && validCode(editCode())) headers['X-Edit-Code'] = editCode();
+    if (KEY_RE.test(sessionKey())) headers.Authorization = 'Bearer ' + sessionKey();
     const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
     let data = null;
     try { data = await res.json(); } catch { /* empty */ }
     if (!res.ok) {
-      if (data && data.code_required) {
-        store.set('editCode', '');
-        state.protected = true;
-        throw new Error('Неправильний код групи. Перевір його й спробуй ще раз.');
+      if (res.status === 401 && sessionKey()) {
+        // revoked key or the owner left the group
+        store.set('key', '');
+        state.me = null;
+        renderAuth();
       }
-      if (data && data.error) throw new Error(data.error);
+      let msg = data && data.error;
       // the hosting proxy may replace our JSON error with its own HTML page
-      if (res.status === 502 || res.status === 503 || res.status === 504) throw new Error('сервер запускається або недоступний, спробуйте за хвилину');
-      throw new Error('Помилка ' + res.status);
+      if (!msg && (res.status === 502 || res.status === 503 || res.status === 504)) msg = 'сервер запускається або недоступний, спробуйте за хвилину';
+      const err = new Error(msg || 'Помилка ' + res.status);
+      err.status = res.status;
+      throw err;
     }
     return data;
   }
@@ -121,11 +142,11 @@
   }
   async function loadPosts() { state.posts = await api('GET', '/api/posts?limit=30'); }
   async function loadCourses() { state.courses = await api('GET', '/api/courses'); }
-  async function loadConfig() { state.protected = (await api('GET', '/api/config')).edit_protected; }
+  async function loadConfig() { state.authRequired = (await api('GET', '/api/config')).auth_required; }
 
   async function reload() {
     try {
-      await Promise.all([loadConfig(), loadCourses(), loadMonth(), loadUpcoming(), loadPosts()]);
+      await Promise.all([loadConfig(), loadMe(), loadCourses(), loadMonth(), loadUpcoming(), loadPosts()]);
     } catch (e) {
       toast('Не вдалося завантажити: ' + e.message, true);
     }
@@ -134,12 +155,25 @@
 
   // ---- render ----
   function render() {
+    renderAuth();
     renderUpcoming();
     renderChips();
     renderCalendar();
     renderDay();
     renderNews();
     renderCourses();
+  }
+
+  function renderAuth() {
+    document.body.classList.toggle('readonly', !canEdit());
+    const box = $('#auth');
+    if (!state.authRequired) { box.innerHTML = ''; return; }
+    if (state.me) {
+      const role = state.me.can_write ? '' : '<span class="badge">перегляд</span>';
+      box.innerHTML = `<span class="me">${esc(state.me.name)}</span>${role}<button type="button" class="link-btn" data-logout>Вийти</button>`;
+    } else {
+      box.innerHTML = '<button type="button" class="btn" data-login>Увійти</button>';
+    }
   }
 
   function renderUpcoming() {
@@ -203,12 +237,12 @@
     const pool = new Map([...state.assignments, ...state.upcoming].map((a) => [a.id, a]));
     const dls = [...pool.values()].filter((a) => a.due_date === k && visible(a.course_id));
     const evs = state.events.filter((e) => e.date === k && visible(e.course_id));
-    const actions = (type, id) => `<span class="item-actions">
+    const actions = (type, id) => `<span class="item-actions edit-only">
       <button type="button" class="link-btn" data-act="edit" data-type="${type}" data-id="${id}">Змінити</button>
       <button type="button" class="link-btn danger" data-act="delete" data-type="${type}" data-id="${id}">Видалити</button></span>`;
 
     let html = `<div class="panel-head"><h3>${longDate(k)}${k === today() ? ' · сьогодні' : ''}</h3>
-      <button type="button" class="link-btn" data-add-on="${k}">+ додати на цей день</button></div>`;
+      <button type="button" class="link-btn edit-only" data-add-on="${k}">+ додати на цей день</button></div>`;
     if (!dls.length && !evs.length) html += '<p class="muted">Нічого не заплановано.</p>';
     html += dls.map((a) => {
       const c = courseOf(a.course_id), link = safeUrl(a.link);
@@ -251,7 +285,7 @@
         ${p.body ? `<p>${esc(p.body)}</p>` : ''}
         <div class="meta">
           <span class="course-line"><span class="dot" style="${cvars(c)}"></span>${esc(p.author)} · ${ago(p.created_at)} · ${esc(c.short)}</span>
-          <span class="item-actions">
+          <span class="item-actions edit-only">
             <button type="button" class="link-btn" data-act="edit" data-type="post" data-id="${p.id}">Змінити</button>
             <button type="button" class="link-btn danger" data-act="delete" data-type="post" data-id="${p.id}">Видалити</button>
           </span>
@@ -267,7 +301,7 @@
         <h3>${esc(c.name)}</h3>
         ${c.teacher ? `<span class="sub">${esc(c.teacher)}</span>` : ''}
         ${link ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(link.replace(/^https?:\/\//, ''))}</a>` : ''}
-        <span class="item-actions">
+        <span class="item-actions edit-only">
           <button type="button" class="link-btn" data-act="edit" data-type="course" data-id="${c.id}">Змінити</button>
           <button type="button" class="link-btn danger" data-act="delete" data-type="course" data-id="${c.id}">Видалити</button>
         </span>
@@ -366,9 +400,9 @@
     $('#tabs').innerHTML = Object.entries(TYPES).map(([k, v]) =>
       `<button type="button" class="tab" role="tab" data-tab="${k}" aria-selected="${k === type}">${v.tab}</button>`).join('');
     const v = Object.assign({ course_id: state.courses[0] ? state.courses[0].id : null }, preset, item || {});
-    $('#fields').innerHTML = fieldsFor(type, v, !item) +
-      input('author', 'Ваше ім’я', store.get('author', ''), 'maxlength="60" autocomplete="name"', 'Запам’ятаємо в цьому браузері. Видно в журналі змін.') +
-      (state.protected ? input('edit_code', 'Код групи', editCode(), 'required autocomplete="off" spellcheck="false" autocapitalize="none"', 'Потрібен для змін. Спитай у чаті групи — запам’ятаємо в цьому браузері.') : '');
+    // with a key the author comes from it; the name field is only for open editing
+    $('#fields').innerHTML = fieldsFor(type, v, !item) + (state.authRequired ? '' :
+      input('author', 'Ваше ім’я', store.get('author', ''), 'maxlength="60" autocomplete="name"', 'Запам’ятаємо в цьому браузері. Видно в журналі змін.'));
   }
 
   function collectForm() {
@@ -393,17 +427,12 @@
 
   async function submitForm(ev) {
     ev.preventDefault();
-    const body = collectForm(), author = $('#form').elements.author.value.trim();
-    body.author = author;
-    store.set('author', author);
-    if (form.type === 'event' && body.repeat_until === '') return showFormError('Вкажіть, до якої дати повторювати');
-    const codeEl = $('#form').elements.edit_code;
-    if (codeEl) {
-      const c = codeEl.value.trim();
-      if (!c) return showFormError('Вкажіть код групи');
-      if (!validCode(c)) return showFormError('Код групи — латиниця, цифри і дефіси');
-      store.set('editCode', c);
+    const body = collectForm(), authorEl = $('#form').elements.author;
+    if (authorEl) {
+      body.author = authorEl.value.trim();
+      store.set('author', body.author);
     }
+    if (form.type === 'event' && body.repeat_until === '') return showFormError('Вкажіть, до якої дати повторювати');
 
     const t = TYPES[form.type], btn = $('#form-submit');
     btn.disabled = true;
@@ -439,7 +468,6 @@
     const item = findItem(type, id);
     const label = item ? (item.title || item.name || item.kind) : '';
     if (!confirm(`Видалити «${label}»?\nЦе можна повернути в журналі змін.`)) return;
-    if (!ensureCode()) return;
     try {
       await api('DELETE', `${TYPES[type].path}/${id}`, { author: store.get('author', '') });
       toast('Видалено — можна повернути в журналі змін');
@@ -474,7 +502,7 @@
         const fields = changedFields(c);
         const right = c.reverted_at ? '<span class="badge">повернуто</span>'
           : c.action === 'revert' ? '<span class="badge">відкат</span>'
-            : `<button type="button" class="btn small${c.action === 'delete' ? ' primary' : ''}" data-revert="${c.id}">${UNDO[c.action] || 'Повернути'}</button>`;
+            : `<button type="button" class="btn small edit-only${c.action === 'delete' ? ' primary' : ''}" data-revert="${c.id}">${UNDO[c.action] || 'Повернути'}</button>`;
         return `<li class="${c.action === 'delete' && !c.reverted_at ? 'del' : ''}">
           <span class="t">${stamp(c.created_at)}</span>
           <span class="stack" style="gap:2px">
@@ -488,7 +516,6 @@
   }
 
   async function revert(id, btn) {
-    if (!ensureCode()) return;
     btn.disabled = true;
     try {
       await api('POST', `/api/changes/${id}/revert`, { author: store.get('author', '') });
@@ -498,6 +525,31 @@
       toast(e.message, true);
       btn.disabled = false;
     }
+  }
+
+  // ---- login ----
+  function openLogin() {
+    $('#login-key').value = '';
+    $('#login-error').hidden = true;
+    $('#login-dialog').showModal();
+    $('#login-key').focus();
+  }
+
+  async function submitLogin(ev) {
+    ev.preventDefault();
+    const key = $('#login-key').value.trim().toLowerCase();
+    const err = (msg) => { $('#login-error').textContent = msg; $('#login-error').hidden = false; };
+    if (!KEY_RE.test(key)) return err('Ключ має вигляд e2_ і 32 символи. Отримай його в боті командою /key.');
+    store.set('key', key);
+    try {
+      await loadMe();
+    } catch (e) {
+      return err(e.message);
+    }
+    if (!state.me) return err('Ключ недійсний або відкликаний. Отримай новий у боті: /key');
+    $('#login-dialog').close();
+    render();
+    toast(state.me.can_write ? 'Привіт, ' + state.me.name + '!' : 'Ключ дає тільки перегляд — право редагувати дає адмін групи');
   }
 
   // ---- toast ----
@@ -534,10 +586,13 @@
       form.preset = keep;
       drawForm();
     } else if (ds.revert) revert(Number(ds.revert), el);
+    else if ('login' in ds) openLogin();
+    else if ('logout' in ds) logout();
     else if ('close' in ds) el.closest('dialog').close();
   });
 
   $('#form').addEventListener('submit', submitForm);
+  $('#login-form').addEventListener('submit', submitLogin);
   $('#btn-add').addEventListener('click', () => openForm('assignment', null, { due_date: state.sel, date: state.sel }));
   $('#btn-add-post').addEventListener('click', () => openForm('post'));
   $('#btn-add-course').addEventListener('click', () => openForm('course'));
@@ -546,5 +601,6 @@
   $('#next').addEventListener('click', () => shiftMonth(1));
   $('#today-btn').addEventListener('click', () => goTo(today()));
 
+  takeKeyFromURL();
   reload();
 })();

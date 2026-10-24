@@ -22,6 +22,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 [hidden] { display: none !important; }
+body.readonly .edit-only { display: none !important; }
 
 .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 24px 64px; display: flex; flex-direction: column; gap: 22px; }
 .stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
@@ -31,7 +32,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; 
 .eyebrow { display: block; font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); }
 h1 { font-family: var(--serif); font-size: 26px; font-weight: 700; letter-spacing: -.01em; }
 h2 { font-family: var(--serif); font-size: 19px; font-weight: 700; }
-.top-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.top-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.auth { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; }
+.auth .me { font-weight: 600; }
 .sec-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .sec-head.between { justify-content: space-between; }
 

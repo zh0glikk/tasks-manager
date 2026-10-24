@@ -13,11 +13,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/zh0glikk/tasks-manager/internal/api"
 	"github.com/zh0glikk/tasks-manager/internal/db"
+	"github.com/zh0glikk/tasks-manager/internal/keyauth"
 	"github.com/zh0glikk/tasks-manager/internal/mcpserver"
 	"github.com/zh0glikk/tasks-manager/internal/store"
 	"github.com/zh0glikk/tasks-manager/internal/telegram"
@@ -255,7 +258,7 @@ func TestBotAndMCP(t *testing.T) {
 		t.Fatalf("non-admin granted write: %q", out)
 	}
 	bot.Handle(ctx, dm(adminID, "Адмін", fmt.Sprintf("/grant %d", irynaKeyID)))
-	if got := fake.last(t, adminID); !strings.Contains(got, "може додавати") {
+	if got := fake.last(t, adminID); !strings.Contains(got, "може редагувати") {
 		t.Fatalf("/grant: %q", got)
 	}
 
@@ -581,4 +584,86 @@ func TestWatchChat(t *testing.T) {
 		t.Fatalf("/chats: %q", got)
 	}
 	_ = st
+}
+
+func TestSiteAuth(t *testing.T) {
+	st, bot, fake, _ := setup(t)
+	ctx := context.Background()
+	site := httptest.NewServer(api.New(st, fstest.MapFS{}, api.Options{Auth: keyauth.Verifier{Store: st, Members: bot}}))
+	defer site.Close()
+
+	do := func(method, path, key, body string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest(method, site.URL+path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var out map[string]any
+		json.NewDecoder(res.Body).Decode(&out)
+		return res.StatusCode, out
+	}
+	post := `{"title":"Новина","author":"Хтось інший"}`
+
+	if code, cfg := do("GET", "/api/config", "", ""); code != 200 || cfg["auth_required"] != true {
+		t.Fatalf("config: %d %v", code, cfg)
+	}
+	if code, _ := do("GET", "/api/courses", "", ""); code != 200 {
+		t.Fatalf("public read: %d", code)
+	}
+	if code, out := do("POST", "/api/posts", "", post); code != 401 || out["login_required"] != true {
+		t.Fatalf("anonymous write: %d %v", code, out)
+	}
+	if code, _ := do("POST", "/api/posts", "e2_"+strings.Repeat("b", 32), post); code != 401 {
+		t.Fatalf("bogus key write: %d", code)
+	}
+
+	// a read-only key logs in but can't edit, and gets no login link
+	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
+	reply := fake.last(t, irynaID)
+	if strings.Contains(reply, "#key=") {
+		t.Fatalf("read-only key got a site login link: %q", reply)
+	}
+	key := keyRe.FindString(reply)
+	if code, me := do("GET", "/api/me", key, ""); code != 200 || me["name"] != "Ірина" || me["can_write"] != false {
+		t.Fatalf("me (read): %d %v", code, me)
+	}
+	if code, out := do("POST", "/api/posts", key, post); code != 403 {
+		t.Fatalf("read-only write: %d %v", code, out)
+	}
+
+	// after /grant the same key edits; the author comes from the key
+	bot.Handle(ctx, dm(adminID, "Адмін", fmt.Sprintf("/grant %d", keyID(t, st, "Ірина"))))
+	if got := fake.last(t, irynaID); !strings.Contains(got, "дали право") {
+		t.Fatalf("grantee not notified: %q", got)
+	}
+	if code, out := do("POST", "/api/posts", key, post); code != 200 {
+		t.Fatalf("granted write: %d %v", code, out)
+	}
+	changes, _ := st.ListChanges(ctx, 1)
+	if changes[0].Author != "Ірина" {
+		t.Fatalf("author spoofable: %q", changes[0].Author)
+	}
+	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
+	if got := fake.last(t, irynaID); !strings.Contains(got, "https://e2.example/#key=e2_") {
+		t.Fatalf("writer got no login link: %q", got)
+	}
+	key = keyRe.FindString(fake.last(t, irynaID))
+
+	// leaving the group ends site access too
+	fake.setMember(groupID, irynaID, "left")
+	left := groupMsg(20, irynaID, "Ірина", "")
+	left.Message.LeftChatMember = &telegram.User{ID: irynaID}
+	bot.Handle(ctx, left)
+	if code, _ := do("POST", "/api/posts", key, post); code != 401 {
+		t.Fatalf("write after leaving: %d", code)
+	}
+	if code, _ := do("GET", "/api/me", key, ""); code != 401 {
+		t.Fatalf("me after leaving: %d", code)
+	}
 }

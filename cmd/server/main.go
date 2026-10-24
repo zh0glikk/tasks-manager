@@ -17,6 +17,7 @@ import (
 
 	"github.com/zh0glikk/tasks-manager/internal/api"
 	"github.com/zh0glikk/tasks-manager/internal/db"
+	"github.com/zh0glikk/tasks-manager/internal/keyauth"
 	"github.com/zh0glikk/tasks-manager/internal/mcpserver"
 	"github.com/zh0glikk/tasks-manager/internal/store"
 	"github.com/zh0glikk/tasks-manager/internal/telegram"
@@ -82,12 +83,18 @@ func main() {
 	}()
 
 	deps := mcpserver.Deps{Store: st, Location: loc}
+	verifier := keyauth.Verifier{Store: st}
 	if bot != nil {
 		deps.Members = bot
+		verifier.Members = bot
+	}
+	open := os.Getenv("OPEN_EDITING") == "true"
+	if open {
+		log.Print("OPEN_EDITING=true: anyone can edit the site without a key")
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpserver.Handler(deps))
-	mux.Handle("/", api.New(st, web.Static(), os.Getenv("EDIT_CODE")))
+	mux.Handle("/", api.New(st, web.Static(), api.Options{Auth: verifier, Open: open}))
 
 	srv := &http.Server{
 		Addr:              ":" + port,

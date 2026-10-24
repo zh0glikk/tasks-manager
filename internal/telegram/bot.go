@@ -449,15 +449,20 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 	if !k.CanWrite() {
 		access = "тільки читання; право додавати записи дає адмін"
 	}
+	site := ""
+	if k.CanWrite() && b.cfg.PublicURL != "" {
+		site = fmt.Sprintf("\n\nРедагувати сайт: <a href=\"%s/#key=%s\">увійти одним кліком</a> (або кнопка «Увійти» на сайті і цей ключ).",
+			html.EscapeString(strings.TrimRight(b.cfg.PublicURL, "/")), key)
+	}
 	b.reply(ctx, uid, fmt.Sprintf(`Твій ключ (%s):
 
 <code>%s</code>
 
 Підключити в Claude Code:
-<code>claude mcp add --transport http e2 %s --header "Authorization: Bearer %s"</code>
+<code>claude mcp add --transport http e2 %s --header "Authorization: Bearer %s"</code>%s
 
-Попередній ключ, якщо був, відкликано. Нікому не пересилай ключ і видали це повідомлення після копіювання. Новий ключ — /key, відкликати — /revoke.`,
-		access, key, html.EscapeString(url), key))
+Попередній ключ, якщо був, відкликано. Нікому не пересилай ключ і посилання та видали це повідомлення після використання. Новий ключ — /key, відкликати — /revoke.`,
+		access, key, html.EscapeString(url), key, site))
 }
 
 func (b *Bot) listKeys(ctx context.Context) string {
@@ -588,9 +593,10 @@ func (b *Bot) setWriter(ctx context.Context, uid int64, cmd, args string) {
 		return
 	}
 	if on {
-		b.reply(ctx, uid, fmt.Sprintf("%s тепер може додавати записи через Claude. Перевипускати ключ не треба.", html.EscapeString(k.Name)))
+		b.reply(ctx, uid, fmt.Sprintf("%s тепер може редагувати сайт і додавати записи через Claude. Перевипускати ключ не треба.", html.EscapeString(k.Name)))
+		b.reply(ctx, *k.TGUserID, "Тобі дали право редагувати календар групи: на сайті (кнопка «Увійти» і твій ключ) і через Claude. Посилання для входу одним кліком — /key (видасть новий ключ).")
 	} else {
-		b.reply(ctx, uid, fmt.Sprintf("%s тепер має доступ тільки на читання.", html.EscapeString(k.Name)))
+		b.reply(ctx, uid, fmt.Sprintf("%s тепер має доступ тільки на перегляд.", html.EscapeString(k.Name)))
 	}
 }
 

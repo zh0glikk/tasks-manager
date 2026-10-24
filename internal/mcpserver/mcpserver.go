@@ -18,6 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/zh0glikk/tasks-manager/internal/keyauth"
 	"github.com/zh0glikk/tasks-manager/internal/ratelimit"
 	"github.com/zh0glikk/tasks-manager/internal/store"
 )
@@ -29,8 +30,7 @@ const (
 
 // Members checks group membership; implemented by the Telegram bot.
 type Members interface {
-	// IsMember reports whether the user is in at least one allowed chat.
-	IsMember(ctx context.Context, userID int64) (bool, error)
+	keyauth.Members
 	// MemberChats lists the allowed chats the user is in.
 	MemberChats(ctx context.Context, userID int64) ([]store.Chat, error)
 }
@@ -72,24 +72,16 @@ func Handler(d Deps) http.Handler {
 
 // verify resolves a bearer token to an active key of a current group member.
 func (s *server) verify(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
-	k, err := s.Store.KeyByToken(ctx, token)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("%w: unknown or revoked key", auth.ErrInvalidToken)
+	v := keyauth.Verifier{Store: s.Store}
+	if s.Members != nil {
+		v.Members = s.Members
+	}
+	k, err := v.Verify(ctx, token)
+	if errors.Is(err, keyauth.ErrInvalid) {
+		return nil, fmt.Errorf("%w: unknown or revoked key, or its owner left the group", auth.ErrInvalidToken)
 	}
 	if err != nil {
 		return nil, err
-	}
-	if k.TGUserID != nil && s.Members != nil {
-		ok, err := s.Members.IsMember(ctx, *k.TGUserID)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			if _, err := s.Store.RevokeUserKeys(ctx, *k.TGUserID); err != nil {
-				log.Printf("mcp: revoke keys of %d: %v", *k.TGUserID, err)
-			}
-			return nil, fmt.Errorf("%w: key owner is no longer in the group", auth.ErrInvalidToken)
-		}
 	}
 	return &auth.TokenInfo{
 		UserID: strconv.FormatInt(k.ID, 10),

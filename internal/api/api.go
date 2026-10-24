@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zh0glikk/tasks-manager/internal/keyauth"
 	"github.com/zh0glikk/tasks-manager/internal/ratelimit"
 	"github.com/zh0glikk/tasks-manager/internal/store"
 	"github.com/zh0glikk/tasks-manager/internal/validate"
@@ -23,18 +24,28 @@ const (
 
 type API struct {
 	store *store.Store
+	auth  keyauth.Verifier
+	lim   *ratelimit.Limiter
 }
 
-// New builds the HTTP handler. A non-empty editCode makes every write require
-// a matching X-Edit-Code header; reads stay public.
-func New(s *store.Store, static fs.FS, editCode string) http.Handler {
-	a := &API{store: s}
+type Options struct {
+	Auth keyauth.Verifier
+	// Open lets anyone edit without a key (local development only).
+	Open bool
+}
+
+// New builds the HTTP handler. Reads are public; writes need a bot-issued key
+// with write access unless opts.Open is set.
+func New(s *store.Store, static fs.FS, opts Options) http.Handler {
+	lim := ratelimit.New(writesPerIP, writesInterval)
+	a := &API{store: s, auth: opts.Auth, lim: lim}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]bool{"edit_protected": editCode != ""})
+		writeJSON(w, http.StatusOK, map[string]bool{"auth_required": !opts.Open})
 	})
+	mux.HandleFunc("GET /api/me", a.me)
 
 	mux.HandleFunc("GET /api/courses", a.listCourses)
 	mux.HandleFunc("POST /api/courses", a.createCourse)
@@ -61,7 +72,7 @@ func New(s *store.Store, static fs.FS, editCode string) http.Handler {
 
 	mux.Handle("GET /", http.FileServerFS(static))
 
-	return logRequests(guard(editCode, ratelimit.New(writesPerIP, writesInterval), mux))
+	return logRequests(guard(opts.Auth, opts.Open, lim, mux))
 }
 
 // ---- handlers ----
@@ -81,7 +92,7 @@ func (a *API) createCourse(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) || !validCourse(w, &req.Course) {
 		return
 	}
-	id, err := a.store.CreateCourse(r.Context(), author(req.Author), req.Course)
+	id, err := a.store.CreateCourse(r.Context(), a.author(r, req.Author), req.Course)
 	respond(w, map[string]int64{"id": id}, err)
 }
 
@@ -90,7 +101,7 @@ func (a *API) updateCourse(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) || !pathID(w, r, &req.ID) || !validCourse(w, &req.Course) {
 		return
 	}
-	respond(w, nil, a.store.UpdateCourse(r.Context(), author(req.Author), req.Course))
+	respond(w, nil, a.store.UpdateCourse(r.Context(), a.author(r, req.Author), req.Course))
 }
 
 func (a *API) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +133,7 @@ func (a *API) createEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	req.SeriesID = nil
-	ids, err := a.store.CreateEvents(r.Context(), author(req.Author), req.Event, dates)
+	ids, err := a.store.CreateEvents(r.Context(), a.author(r, req.Author), req.Event, dates)
 	respond(w, map[string][]int64{"ids": ids}, err)
 }
 
@@ -131,7 +142,7 @@ func (a *API) updateEvent(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) || !pathID(w, r, &req.ID) || !validEvent(w, &req.Event) {
 		return
 	}
-	respond(w, nil, a.store.UpdateEvent(r.Context(), author(req.Author), req.Event))
+	respond(w, nil, a.store.UpdateEvent(r.Context(), a.author(r, req.Author), req.Event))
 }
 
 func (a *API) listAssignments(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +164,7 @@ func (a *API) createAssignment(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) || !validAssignment(w, &req.Assignment) {
 		return
 	}
-	id, err := a.store.CreateAssignment(r.Context(), author(req.Author), req.Assignment)
+	id, err := a.store.CreateAssignment(r.Context(), a.author(r, req.Author), req.Assignment)
 	respond(w, map[string]int64{"id": id}, err)
 }
 
@@ -162,7 +173,7 @@ func (a *API) updateAssignment(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) || !pathID(w, r, &req.ID) || !validAssignment(w, &req.Assignment) {
 		return
 	}
-	respond(w, nil, a.store.UpdateAssignment(r.Context(), author(req.Author), req.Assignment))
+	respond(w, nil, a.store.UpdateAssignment(r.Context(), a.author(r, req.Author), req.Assignment))
 }
 
 func (a *API) listPosts(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +192,7 @@ func (a *API) createPost(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) || !validPost(w, &req.Post) {
 		return
 	}
-	id, err := a.store.CreatePost(r.Context(), author(req.Author), req.Post)
+	id, err := a.store.CreatePost(r.Context(), a.author(r, req.Author), req.Post)
 	respond(w, map[string]int64{"id": id}, err)
 }
 
@@ -190,7 +201,7 @@ func (a *API) updatePost(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) || !pathID(w, r, &req.ID) || !validPost(w, &req.Post) {
 		return
 	}
-	respond(w, nil, a.store.UpdatePost(r.Context(), author(req.Author), req.Post))
+	respond(w, nil, a.store.UpdatePost(r.Context(), a.author(r, req.Author), req.Post))
 }
 
 type authorReq struct {
@@ -204,7 +215,7 @@ func (a *API) delete(entity string) http.HandlerFunc {
 		if !decode(w, r, &req) || !pathID(w, r, &id) {
 			return
 		}
-		respond(w, nil, a.store.Delete(r.Context(), author(req.Author), entity, id))
+		respond(w, nil, a.store.Delete(r.Context(), a.author(r, req.Author), entity, id))
 	}
 }
 
@@ -219,7 +230,7 @@ func (a *API) revert(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) || !pathID(w, r, &id) {
 		return
 	}
-	respond(w, nil, a.store.Revert(r.Context(), author(req.Author), id))
+	respond(w, nil, a.store.Revert(r.Context(), a.author(r, req.Author), id))
 }
 
 // ---- validation ----
@@ -237,6 +248,28 @@ func valid(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	return true
+}
+
+// me tells the UI who is logged in and whether they may edit.
+func (a *API) me(w http.ResponseWriter, r *http.Request) {
+	if ok, _ := a.lim.Allow("me:" + clientIP(r)); !ok {
+		fail(w, http.StatusTooManyRequests, "забагато спроб, спробуй за хвилину")
+		return
+	}
+	k, status, msg := authenticate(r, a.auth)
+	if status != 0 {
+		fail(w, status, msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": k.Name, "can_write": k.CanWrite()})
+}
+
+// author is the key owner's name when logged in, else the name the client sent.
+func (a *API) author(r *http.Request, fallback string) string {
+	if k, ok := keyFrom(r.Context()); ok {
+		return author(k.Name)
+	}
+	return author(fallback)
 }
 
 func author(s string) string {

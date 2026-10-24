@@ -1,19 +1,24 @@
 package api
 
 import (
-	"crypto/subtle"
+	"context"
+	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/zh0glikk/tasks-manager/internal/keyauth"
 	"github.com/zh0glikk/tasks-manager/internal/ratelimit"
+	"github.com/zh0glikk/tasks-manager/internal/store"
 )
 
-// guard protects writes: a per-IP rate limit (which also caps edit-code
-// guessing) and, when an edit code is configured, a matching X-Edit-Code header.
-func guard(editCode string, lim *ratelimit.Limiter, next http.Handler) http.Handler {
-	editCode = normalizeCode(editCode)
+type keyCtx struct{}
+
+// guard protects writes with a per-IP rate limit and, unless editing is open,
+// a bot-issued key with write access in the Authorization header.
+func guard(auth keyauth.Verifier, open bool, lim *ratelimit.Limiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead || !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
@@ -24,16 +29,43 @@ func guard(editCode string, lim *ratelimit.Limiter, next http.Handler) http.Hand
 			fail(w, http.StatusTooManyRequests, "забагато змін за хвилину, спробуйте трохи згодом")
 			return
 		}
-		if editCode != "" && subtle.ConstantTimeCompare([]byte(normalizeCode(r.Header.Get("X-Edit-Code"))), []byte(editCode)) != 1 {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "неправильний код групи", "code_required": true})
+		if open {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		k, status, msg := authenticate(r, auth)
+		if status != 0 {
+			writeJSON(w, status, map[string]any{"error": msg, "login_required": status == http.StatusUnauthorized})
+			return
+		}
+		if !k.CanWrite() {
+			fail(w, http.StatusForbidden, "твій ключ дає тільки перегляд; право редагувати дає адмін групи (/grant у боті)")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), keyCtx{}, k)))
 	})
 }
 
-func normalizeCode(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
+// authenticate checks the bearer key; a non-zero status is an HTTP error to return.
+func authenticate(r *http.Request, auth keyauth.Verifier) (store.APIKey, int, string) {
+	tok, ok := keyauth.Bearer(r)
+	if !ok {
+		return store.APIKey{}, http.StatusUnauthorized, "увійди з ключем із Telegram-бота, щоб редагувати"
+	}
+	k, err := auth.Verify(r.Context(), tok)
+	if errors.Is(err, keyauth.ErrInvalid) {
+		return k, http.StatusUnauthorized, "ключ недійсний або відкликаний; отримай новий у боті: /key"
+	}
+	if err != nil {
+		log.Printf("auth: %v", err)
+		return k, http.StatusInternalServerError, "не вдалося перевірити ключ, спробуй пізніше"
+	}
+	return k, 0, ""
+}
+
+func keyFrom(ctx context.Context) (store.APIKey, bool) {
+	k, ok := ctx.Value(keyCtx{}).(store.APIKey)
+	return k, ok
 }
 
 // clientIP prefers the address set by the hosting proxy.

@@ -17,11 +17,12 @@
       <h1>Е2 Екологія · що на коли</h1>
     </div>
     <div class="top-actions">
+      <span class="auth" id="auth"></span>
       <button type="button" class="btn" id="btn-history">
         <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
         Журнал змін
       </button>
-      <button type="button" class="btn primary" id="btn-add">
+      <button type="button" class="btn primary edit-only" id="btn-add">
         <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         Додати
       </button>
@@ -57,7 +58,7 @@
     <aside class="stack" aria-labelledby="news-h">
       <div class="sec-head between">
         <h2 id="news-h">Новини</h2>
-        <button type="button" class="link-btn" id="btn-add-post">+ написати</button>
+        <button type="button" class="link-btn edit-only" id="btn-add-post">+ написати</button>
       </div>
       <div class="stack" id="news"></div>
     </aside>
@@ -66,7 +67,7 @@
   <section aria-labelledby="courses-h" class="stack">
     <div class="sec-head between">
       <h2 id="courses-h">Предмети</h2>
-      <button type="button" class="link-btn" id="btn-add-course">+ предмет</button>
+      <button type="button" class="link-btn edit-only" id="btn-add-course">+ предмет</button>
     </div>
     <div class="courses" id="courses"></div>
   </section>
@@ -97,6 +98,24 @@
     <button type="button" class="icon-btn" data-close aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
   <ol class="history" id="history"></ol>
+</dialog>
+
+<dialog id="login-dialog" aria-labelledby="login-title">
+  <form id="login-form" novalidate>
+    <div class="dlg-head">
+      <h2 id="login-title">Увійти</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <label class="field">Ключ із Telegram-бота
+      <input id="login-key" autocomplete="off" spellcheck="false" autocapitalize="none" placeholder="e2_…">
+      <span class="hint">Напиши боту групи в особисті <b>/key</b>. Редагувати сайт можуть ті, кому адмін дав право запису; іншим ключ дає тільки перегляд. Ключ збережеться в цьому браузері.</span>
+    </label>
+    <p class="form-error" id="login-error" role="alert" hidden></p>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>Скасувати</button>
+      <button type="submit" class="btn primary">Увійти</button>
+    </div>
+  </form>
 </dialog>
 
 <div class="toast" id="toast" role="status" hidden></div>
