@@ -50,6 +50,35 @@ func (s *Store) ListMessages(ctx context.Context, chatIDs []int64, since, until 
 	})
 }
 
+// ImportMessages stores messages from a chat export that are older than the
+// first message the bot saw live in that chat, so the two never overlap.
+// Re-running it is harmless. It returns how many messages were imported.
+func (s *Store) ImportMessages(ctx context.Context, chatID int64, msgs []ChatMessage) (int, error) {
+	var firstLive *time.Time
+	if err := s.db.QueryRow(ctx, `select min(sent_at) from tg_messages where chat_id = $1 and message_id > 0`, chatID).Scan(&firstLive); err != nil {
+		return 0, err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	n := 0
+	for _, m := range msgs {
+		if firstLive != nil && !m.SentAt.Before(*firstLive) {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `insert into tg_messages (chat_id, message_id, from_id, from_name, text, reply_to, sent_at, edited_at)
+			values ($1, $2, $3, $4, $5, $6, $7, $8)
+			on conflict (chat_id, message_id) do update set text = excluded.text, edited_at = excluded.edited_at`,
+			m.ChatID, m.MessageID, m.FromID, m.FromName, m.Text, m.ReplyTo, m.SentAt, m.EditedAt); err != nil {
+			return 0, err
+		}
+		n++
+	}
+	return n, tx.Commit(ctx)
+}
+
 // Purge drops chat messages and MCP access records older than before.
 func (s *Store) Purge(ctx context.Context, before time.Time) (int64, error) {
 	tag, err := s.db.Exec(ctx, `delete from tg_messages where sent_at < $1`, before)

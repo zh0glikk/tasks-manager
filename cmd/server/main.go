@@ -48,11 +48,14 @@ func main() {
 	defer pool.Close()
 	st := store.New(pool)
 
-	if len(os.Args) > 1 && os.Args[1] == "keys" {
+	if len(os.Args) > 1 && (os.Args[1] == "keys" || os.Args[1] == "import-telegram") {
 		if err := db.Migrate(ctx, pool); err != nil {
 			log.Fatalf("migrate: %v", err)
 		}
-		os.Exit(keysCommand(ctx, st, os.Args[2:]))
+		if os.Args[1] == "keys" {
+			os.Exit(keysCommand(ctx, st, os.Args[2:]))
+		}
+		os.Exit(importCommand(ctx, st, os.Args[2:]))
 	}
 
 	var bot *telegram.Bot

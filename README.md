@@ -109,6 +109,14 @@ DATABASE_URL=postgres://tasks:tasks@localhost:5432/tasks?sslmode=disable go run 
 | `PUBLIC_URL` | `https://clownfish-app-lpt6d.ondigitalocean.app` | для посилань і команди підключення |
 | `CHAT_RETENTION_DAYS` | `14` | скільки днів зберігати повідомлення |
 
+Імпорт історії чату (бот бачить повідомлення лише з моменту, коли його додали): у Telegram Desktop відкрий
+чат → ⋮ → Export chat history → формат JSON, без медіа. Потім виконай
+`/app import-telegram result.json [--watch]`. Команда дозволить чат (основним або для спостереження) і додасть
+повідомлення, старші за перше, яке бот уже зберіг сам, тож дублів не буде і повторний запуск безпечний.
+Локально проти продової бази:
+`docker run --rm --env-file .env -v "$PWD/result.json":/data/result.json:ro <образ> /app import-telegram /data/result.json`
+(у `.env` має бути `DATABASE_URL`). `result.json` і `.env` у git не потрапляють.
+
 Ключ без Telegram (для себе чи для тестів): у DO відкрий App → Console і виконай
 `/app keys create "Ім'я" [--read]`, а також `/app keys list` і `/app keys revoke ID`.
 

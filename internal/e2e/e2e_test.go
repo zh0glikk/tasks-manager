@@ -677,3 +677,88 @@ func TestSiteAuth(t *testing.T) {
 		t.Fatalf("me after leaving: %d", code)
 	}
 }
+
+const exportFixture = `{
+ "name": "Тестова група", "type": "private_group", "id": 4242,
+ "messages": [
+  {"id": 1, "type": "service", "date_unixtime": "1790000000", "action": "join_group_by_link"},
+  {"id": 2, "type": "message", "date_unixtime": "1790000100", "from": "Ірина", "from_id": "user111", "text": "Есе до вівторка"},
+  {"id": 3, "type": "message", "date_unixtime": "1790000200", "from": "Максим", "from_id": "user222",
+   "text": ["Ось ", {"type": "link", "text": "https://classroom.example"}, " шаблон"], "reply_to_message_id": 2,
+   "edited_unixtime": "1790000300"},
+  {"id": 4, "type": "message", "date_unixtime": "1790000400", "from": "Ірина", "from_id": "user111",
+   "text": "", "file": "x.pdf", "file_name": "Завдання.pdf", "forwarded_from": "Викладач"},
+  {"id": 5, "type": "message", "date_unixtime": "1790000500", "from": "Олег", "from_id": "user444", "text": ""},
+  {"id": 6, "type": "message", "date_unixtime": "1790000600", "from": "Олег", "from_id": "user444", "text": "пізніше за живі"}
+ ]
+}`
+
+func TestImportExport(t *testing.T) {
+	st, _, _, url := setup(t)
+	ctx := context.Background()
+
+	exp, err := telegram.ParseExport(strings.NewReader(exportFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatID, err := exp.ChatID()
+	if err != nil || chatID != -4242 {
+		t.Fatalf("chat id: %d %v", chatID, err)
+	}
+	if _, _, err := st.TouchChat(ctx, chatID, exp.Name, store.ChatAllowed); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AllowChat(ctx, chatID, store.ChatMain); err != nil {
+		t.Fatal(err)
+	}
+
+	// the bot already stored a live message (its own numbering) before message 6
+	live := time.Unix(1790000550, 0)
+	if err := st.SaveMessage(ctx, store.ChatMessage{ChatID: chatID, MessageID: 2, FromName: "Олег", Text: "живе повідомлення", SentAt: live}); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := exp.ChatMessages(chatID)
+	if len(msgs) != 4 { // service and empty messages skipped
+		t.Fatalf("parsed %d messages", len(msgs))
+	}
+	for range 2 { // re-running is harmless
+		n, err := st.ImportMessages(ctx, chatID, msgs)
+		if err != nil || n != 3 {
+			t.Fatalf("imported %d, %v", n, err)
+		}
+	}
+
+	all, _ := st.ListMessages(ctx, []int64{chatID}, time.Unix(0, 0), time.Now(), 100)
+	if len(all) != 4 {
+		t.Fatalf("stored %d messages: %+v", len(all), all)
+	}
+	got := map[int64]store.ChatMessage{}
+	for _, m := range all {
+		got[m.MessageID] = m
+	}
+	if got[2].Text != "живе повідомлення" {
+		t.Fatalf("live message overwritten: %+v", got[2])
+	}
+	if m := got[-3]; m.Text != "Ось https://classroom.example шаблон" || m.ReplyTo == nil || *m.ReplyTo != -2 || m.EditedAt == nil || m.FromID != 222 {
+		t.Fatalf("entities/reply/edit: %+v", m)
+	}
+	if m := got[-4]; m.Text != "[переслано від Викладач] [файл: Завдання.pdf]" {
+		t.Fatalf("file/forward: %q", m.Text)
+	}
+	if _, ok := got[-6]; ok {
+		t.Fatal("message newer than the first live one was imported")
+	}
+
+	// visible through MCP to an admin console key
+	key, _, _ := st.CreateKey(ctx, "Адмін", nil, store.ScopeRead)
+	s, err := connect(t, url, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	out, _ := call(t, s, "chat_messages", map[string]any{"since": "2026-09-01", "chat": "Тестова"})
+	if !strings.Contains(out, "Ірина: Есе до вівторка") || !strings.Contains(out, "(відповідь на #-2)") {
+		t.Fatalf("chat_messages: %q", out)
+	}
+}

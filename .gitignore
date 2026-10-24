@@ -2,3 +2,7 @@
 /app
 /tasks-manager
 .env
+/vendor
+# Telegram chat exports contain private messages
+result.json
+ChatExport_*/
