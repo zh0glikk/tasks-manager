@@ -19,6 +19,7 @@ services:
     environment:
       DATABASE_URL: postgres://tasks:tasks@db:5432/tasks?sslmode=disable
       PORT: "8080"
+      EDIT_CODE: ${EDIT_CODE:-}
     ports:
       - "8080:8080"
     depends_on:

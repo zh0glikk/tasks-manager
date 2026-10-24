@@ -15,7 +15,11 @@ import (
 	"github.com/zh0glikk/tasks-manager/internal/store"
 )
 
-const maxSeries = 60
+const (
+	maxSeries      = 60
+	writesPerIP    = 30
+	writesInterval = time.Minute
+)
 
 var (
 	reDate  = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
@@ -27,11 +31,16 @@ type API struct {
 	store *store.Store
 }
 
-func New(s *store.Store, static fs.FS) http.Handler {
+// New builds the HTTP handler. A non-empty editCode makes every write require
+// a matching X-Edit-Code header; reads stay public.
+func New(s *store.Store, static fs.FS, editCode string) http.Handler {
 	a := &API{store: s}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]bool{"edit_protected": editCode != ""})
+	})
 
 	mux.HandleFunc("GET /api/courses", a.listCourses)
 	mux.HandleFunc("POST /api/courses", a.createCourse)
@@ -58,7 +67,7 @@ func New(s *store.Store, static fs.FS) http.Handler {
 
 	mux.Handle("GET /", http.FileServerFS(static))
 
-	return logRequests(mux)
+	return logRequests(guard(editCode, newLimiter(writesPerIP, writesInterval), mux))
 }
 
 // ---- handlers ----

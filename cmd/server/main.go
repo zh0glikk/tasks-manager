@@ -47,7 +47,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           waitReady(&ready, api.New(store.New(pool), web.Static())),
+		Handler:           waitReady(&ready, api.New(store.New(pool), web.Static(), os.Getenv("EDIT_CODE"))),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
