@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -241,6 +242,23 @@ func TestBotAndMCP(t *testing.T) {
 		t.Fatalf("courses: %q", out)
 	}
 
+	// /key gives read-only access until an admin grants write
+	if !strings.Contains(fake.last(t, irynaID), "тільки читання") {
+		t.Fatalf("new key isn't read-only: %q", fake.last(t, irynaID))
+	}
+	if out, isErr = call(t, s, "add_news", map[string]any{"title": "до grant"}); !isErr || !strings.Contains(out, "/grant") {
+		t.Fatalf("read-only key wrote: %q", out)
+	}
+	irynaKeyID := keyID(t, st, "Ірина")
+	bot.Handle(ctx, dm(irynaID, "Ірина", fmt.Sprintf("/grant %d", irynaKeyID))) // not an admin: ignored
+	if out, isErr = call(t, s, "add_news", map[string]any{"title": "self grant"}); !isErr {
+		t.Fatalf("non-admin granted write: %q", out)
+	}
+	bot.Handle(ctx, dm(adminID, "Адмін", fmt.Sprintf("/grant %d", irynaKeyID)))
+	if got := fake.last(t, adminID); !strings.Contains(got, "може додавати") {
+		t.Fatalf("/grant: %q", got)
+	}
+
 	due := time.Now().AddDate(0, 0, 4).Format(time.DateOnly)
 	args := map[string]any{"title": "Есе «My research»", "due_date": due, "due_time": "17:00", "course_id": 2}
 	if out, isErr = call(t, s, "add_deadline", args); isErr || !strings.Contains(out, "Додано дедлайн") {
@@ -308,11 +326,14 @@ func TestBotAndMCP(t *testing.T) {
 		t.Fatalf("/keys: %q", got)
 	}
 
-	// a new /key revokes the previous one
+	// a new /key revokes the previous one and keeps the write grant
 	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
 	newKey := keyRe.FindString(fake.last(t, irynaID))
 	if newKey == "" || newKey == key {
 		t.Fatal("no fresh key")
+	}
+	if !strings.Contains(fake.last(t, irynaID), "читання і запис") {
+		t.Fatalf("write grant lost on reissue: %q", fake.last(t, irynaID))
 	}
 	if _, err := connect(t, url, key); err == nil {
 		t.Fatal("old key still works")
@@ -355,6 +376,33 @@ func TestMemberCheckRevokesWithoutLeaveEvent(t *testing.T) {
 	}
 }
 
+func keyID(t *testing.T, st *store.Store, name string) int64 {
+	t.Helper()
+	keys, err := st.ListKeys(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		if k.Name == name {
+			return k.ID
+		}
+	}
+	t.Fatalf("no key for %s", name)
+	return 0
+}
+
+func (f *fakeTelegram) count(chatID int64) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, m := range f.sent {
+		if m.ChatID == chatID {
+			n++
+		}
+	}
+	return n
+}
+
 func fakeURL(t *testing.T, f *fakeTelegram) string {
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
@@ -383,8 +431,11 @@ func TestMultipleChats(t *testing.T) {
 		t.Fatalf("non-admin changed status to %s", c.Status)
 	}
 	bot.Handle(ctx, dm(adminID, "Адмін", "/allow -1005555"))
-	if got := fake.last(t, adminID); !strings.Contains(got, "дозволено") {
+	if got := fake.last(t, adminID); !strings.Contains(got, "основний") {
 		t.Fatalf("/allow: %q", got)
+	}
+	if got := fake.last(t, englishID); !strings.Contains(got, "Зберігаю текстові повідомлення") || !strings.Contains(got, "/key") {
+		t.Fatalf("no privacy notice in the chat: %q", got)
 	}
 	bot.Handle(ctx, chatMsg(englishID, "Англійська гр.5", 3, maksymID, "Максим", "Unit 4 до четверга"))
 	bot.Handle(ctx, groupMsg(4, irynaID, "Ірина", "привіт з основного чату"))
@@ -474,4 +525,60 @@ func TestMultipleChats(t *testing.T) {
 	if got := fake.last(t, adminID); !strings.Contains(got, "-1007777") || !strings.Contains(got, "заборонено") {
 		t.Fatalf("/chats: %q", got)
 	}
+}
+
+func TestWatchChat(t *testing.T) {
+	st, bot, fake, url := setup(t)
+	ctx := context.Background()
+	const methID = int64(-1008888)
+	const strangerID = int64(555) // from another group, only in the shared chat
+
+	bot.Handle(ctx, chatMsg(methID, "Методологія (всі групи)", 1, strangerID, "Інна", "привіт усім"))
+	bot.Handle(ctx, dm(adminID, "Адмін", "/allow -1008888 watch"))
+	if got := fake.last(t, adminID); !strings.Contains(got, "спостереження") {
+		t.Fatalf("/allow watch: %q", got)
+	}
+	notice := fake.last(t, methID)
+	if !strings.Contains(notice, "Зберігаю") || strings.Contains(notice, "/key") {
+		t.Fatalf("watch notice: %q", notice)
+	}
+	bot.Handle(ctx, chatMsg(methID, "Методологія (всі групи)", 2, strangerID, "Інна", "звіт здати до 10.11"))
+	fake.setMember(methID, strangerID, "member")
+	fake.setMember(methID, irynaID, "member")
+
+	// commands are ignored in watch chats
+	before := fake.count(methID)
+	bot.Handle(ctx, chatMsg(methID, "Методологія (всі групи)", 3, strangerID, "Інна", "/week"))
+	if fake.count(methID) != before {
+		t.Fatalf("bot answered a command in a watch chat: %q", fake.last(t, methID))
+	}
+
+	// a member of only the watch chat gets no key
+	bot.Handle(ctx, dm(strangerID, "Інна", "/key"))
+	if got := fake.last(t, strangerID); keyRe.MatchString(got) {
+		t.Fatalf("watch-chat member got a key: %q", got)
+	}
+
+	// a main-chat member who is also in the watch chat reads both
+	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
+	s, err := connect(t, url, keyRe.FindString(fake.last(t, irynaID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	out, _ := call(t, s, "chat_messages", map[string]any{"chat": "методолог"})
+	if !strings.Contains(out, "Інна: звіт здати до 10.11") {
+		t.Fatalf("watch chat not readable: %q", out)
+	}
+	out, _ = call(t, s, "chats", nil)
+	if !strings.Contains(out, "Методологія (всі групи)") || !strings.Contains(out, "-1001234") {
+		t.Fatalf("chats: %q", out)
+	}
+
+	// /chats shows the kinds
+	bot.Handle(ctx, dm(adminID, "Адмін", "/chats"))
+	if got := fake.last(t, adminID); !strings.Contains(got, "спостереження") || !strings.Contains(got, "основний") {
+		t.Fatalf("/chats: %q", got)
+	}
+	_ = st
 }

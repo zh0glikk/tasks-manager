@@ -72,6 +72,7 @@ func (b *Bot) Run(ctx context.Context) {
 	if err := b.Bootstrap(ctx); err != nil {
 		log.Printf("telegram: bootstrap: %v", err)
 	}
+	b.setCommands(ctx)
 	if err := b.tg.DeleteWebhook(ctx); err != nil {
 		log.Printf("telegram: deleteWebhook: %v", err)
 	}
@@ -112,7 +113,47 @@ func (b *Bot) Bootstrap(ctx context.Context) error {
 	if _, _, err := b.store.TouchChat(ctx, b.cfg.ChatID, "", store.ChatAllowed); err != nil {
 		return err
 	}
-	return b.store.SetChatStatus(ctx, b.cfg.ChatID, store.ChatAllowed)
+	return b.store.AllowChat(ctx, b.cfg.ChatID, store.ChatMain)
+}
+
+// setCommands registers the "/" menu: group, private and admin variants.
+func (b *Bot) setCommands(ctx context.Context) {
+	group := []BotCommand{
+		{"today", "Що сьогодні: пари й дедлайни"},
+		{"week", "Що на тиждень"},
+		{"help", "Довідка"},
+	}
+	private := []BotCommand{
+		{"key", "Персональний ключ для Claude"},
+		{"revoke", "Відкликати свій ключ"},
+		{"help", "Довідка"},
+	}
+	admin := append(append([]BotCommand{}, private...),
+		BotCommand{"chats", "Чати бота"},
+		BotCommand{"keys", "Ключі та права запису"},
+		BotCommand{"allow", "Дозволити чат: ID [watch]"},
+		BotCommand{"deny", "Заборонити чат: ID"},
+		BotCommand{"grant", "Дати право запису: ID ключа"},
+		BotCommand{"ungrant", "Забрати право запису: ID ключа"},
+	)
+	sets := []struct {
+		cmds  []BotCommand
+		scope map[string]any
+	}{
+		{group, map[string]any{"type": "all_group_chats"}},
+		{private, map[string]any{"type": "all_private_chats"}},
+	}
+	for id := range b.admins {
+		sets = append(sets, struct {
+			cmds  []BotCommand
+			scope map[string]any
+		}{admin, map[string]any{"type": "chat", "chat_id": id}})
+	}
+	for _, set := range sets {
+		if err := b.tg.SetMyCommands(ctx, set.cmds, set.scope); err != nil {
+			log.Printf("telegram: setMyCommands %v: %v", set.scope, err)
+		}
+	}
 }
 
 func (b *Bot) loadOffset(ctx context.Context) int64 {
@@ -207,7 +248,7 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message, edited bool) {
 			b.memberLeft(ctx, c.ID, m.LeftChatMember.ID)
 		}
 		b.save(ctx, m)
-		if !edited {
+		if !edited && c.Kind == store.ChatMain {
 			b.group(ctx, m, cmd)
 		}
 	}
@@ -297,11 +338,22 @@ const privateHelp = `Я бот календаря групи.
 <b>У чаті групи:</b> /today, /week — що на сьогодні й на тиждень; увечері нагадую про завтрашні дедлайни.
 
 <b>Тут, в особистих:</b>
-/key — отримати персональний ключ для Claude (MCP): читати переписку групи, календар і додавати дедлайни
-/key read — ключ тільки для читання
+/key — персональний ключ для Claude (MCP): читати переписку чатів групи і календар. Додавати записи можуть лише ті, кому адмін дав право.
 /revoke — відкликати свій ключ
 
-Ключ видається тільки учасникам чатів групи і перестає працювати, якщо вийти з них. Я зберігаю повідомлення обмежений час, щоб Claude міг робити саммарі; через Claude кожен бачить тільки ті чати, де він сам є.`
+Ключ видається учасникам основних чатів групи і перестає працювати, якщо вийти з них. Я зберігаю повідомлення обмежений час, щоб Claude міг робити саммарі; через Claude кожен бачить тільки ті чати, де він сам є.`
+
+const adminHelp = `
+
+<b>Адмін:</b>
+/chats — чати бота
+/allow ID — основний чат (ключі, нагадування, команди)
+/allow ID watch — лише зберігати переписку для тих, у кого вже є ключ
+/deny ID — заборонити і видалити історію
+/reminders ID on|off
+/keys — ключі
+/grant ID · /ungrant ID — дати / забрати право запису (ID ключа з /keys)
+/revokekey ID`
 
 func (b *Bot) private(ctx context.Context, m *Message, cmd, args string) {
 	uid := m.From.ID
@@ -330,6 +382,10 @@ func (b *Bot) private(ctx context.Context, m *Message, cmd, args string) {
 		if b.admins[uid] {
 			b.setChatStatus(ctx, uid, cmd, args)
 		}
+	case "/grant", "/ungrant":
+		if b.admins[uid] {
+			b.setWriter(ctx, uid, cmd, args)
+		}
 	case "/reminders":
 		if b.admins[uid] {
 			b.setReminders(ctx, uid, args)
@@ -351,7 +407,7 @@ func (b *Bot) private(ctx context.Context, m *Message, cmd, args string) {
 	default:
 		help := privateHelp
 		if b.admins[uid] {
-			help += "\n\n<b>Адмін:</b> /chats — чати бота, /allow ID, /deny ID, /reminders ID on|off, /keys, /revokekey ID"
+			help += adminHelp
 		}
 		b.reply(ctx, uid, help)
 	}
@@ -369,9 +425,15 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 		b.reply(ctx, uid, "Ключ видається тільки учасникам чатів групи, до яких підключений бот.")
 		return
 	}
-	scope := store.ScopeWrite
-	if strings.EqualFold(args, "read") {
-		scope = store.ScopeRead
+	scope := store.ScopeRead
+	if !strings.EqualFold(args, "read") {
+		writer, err := b.store.IsWriter(ctx, uid)
+		if err != nil {
+			log.Printf("telegram: writer check %d: %v", uid, err)
+		}
+		if writer || b.admins[uid] {
+			scope = store.ScopeWrite
+		}
 	}
 	key, k, err := b.store.CreateKey(ctx, m.From.DisplayName(), &uid, scope)
 	if err != nil {
@@ -385,7 +447,7 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 	}
 	access := "читання і запис"
 	if !k.CanWrite() {
-		access = "тільки читання"
+		access = "тільки читання; право додавати записи дає адмін"
 	}
 	b.reply(ctx, uid, fmt.Sprintf(`Твій ключ (%s):
 
@@ -413,9 +475,13 @@ func (b *Bot) listKeys(ctx context.Context) string {
 		if k.LastUsedAt != nil {
 			used = "востаннє " + k.LastUsedAt.In(b.cfg.Location).Format("02.01 15:04")
 		}
-		fmt.Fprintf(&sb, "#%d %s · %s · %s\n", k.ID, html.EscapeString(k.Name), k.Scope, used)
+		scope := "читання"
+		if k.CanWrite() {
+			scope = "запис"
+		}
+		fmt.Fprintf(&sb, "#%d %s · %s · %s\n", k.ID, html.EscapeString(k.Name), scope, used)
 	}
-	sb.WriteString("\nВідкликати: /revokekey ID")
+	sb.WriteString("\n/grant ID · /ungrant ID · /revokekey ID")
 	return sb.String()
 }
 
@@ -433,27 +499,41 @@ func (b *Bot) listChats(ctx context.Context) string {
 	var sb strings.Builder
 	sb.WriteString("<b>Чати</b>\n")
 	for _, c := range chats {
-		rem := ""
-		if c.Status == store.ChatAllowed && !c.Reminders {
-			rem = " · без нагадувань"
+		extra := ""
+		if c.Status == store.ChatAllowed {
+			if c.Kind == store.ChatWatch {
+				extra = " · спостереження"
+			} else {
+				extra = " · основний"
+				if !c.Reminders {
+					extra += ", без нагадувань"
+				}
+			}
 		}
-		fmt.Fprintf(&sb, "<code>%d</code> %s · %s%s\n", c.ID, html.EscapeString(c.Title), labels[c.Status], rem)
+		fmt.Fprintf(&sb, "<code>%d</code> %s · %s%s\n", c.ID, html.EscapeString(c.Title), labels[c.Status], extra)
 	}
-	sb.WriteString("\n/allow ID · /deny ID · /reminders ID on|off")
+	sb.WriteString("\n/allow ID [watch] · /deny ID · /reminders ID on|off")
 	return sb.String()
 }
 
 func (b *Bot) setChatStatus(ctx context.Context, uid int64, cmd, args string) {
-	id, err := strconv.ParseInt(args, 10, 64)
-	if err != nil {
-		b.reply(ctx, uid, "Формат: "+cmd+" -1001234567890 (id — з /chats)")
+	idStr, mode, _ := strings.Cut(args, " ")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if err != nil || (mode != "" && mode != "watch") {
+		b.reply(ctx, uid, "Формат: /allow -1001234567890 [watch] або /deny -1001234567890 (id — з /chats)")
 		return
 	}
-	status := store.ChatAllowed
-	if cmd == "/deny" {
-		status = store.ChatDenied
+	kind := store.ChatMain
+	if mode == "watch" {
+		kind = store.ChatWatch
 	}
-	if err := b.store.SetChatStatus(ctx, id, status); err != nil {
+	if cmd == "/deny" {
+		err = b.store.SetChatStatus(ctx, id, store.ChatDenied)
+	} else {
+		err = b.store.AllowChat(ctx, id, kind)
+	}
+	if err != nil {
 		b.reply(ctx, uid, "Чат не знайдено. Список — /chats")
 		return
 	}
@@ -464,10 +544,53 @@ func (b *Bot) setChatStatus(ctx context.Context, uid int64, cmd, args string) {
 		}
 	}
 	b.mu.Unlock()
-	if status == store.ChatAllowed {
-		b.reply(ctx, uid, fmt.Sprintf("Чат <code>%d</code> дозволено: зберігаю переписку, учасники можуть отримати ключ через /key.", id))
-	} else {
+	switch {
+	case cmd == "/deny":
 		b.reply(ctx, uid, fmt.Sprintf("Чат <code>%d</code> заборонено, збережену переписку з нього видалено.", id))
+	case kind == store.ChatWatch:
+		b.reply(ctx, uid, fmt.Sprintf("Чат <code>%d</code> дозволено для спостереження: зберігаю переписку для учасників, у яких уже є ключ; ключі тут не видаються, нагадувань і команд немає.", id))
+		b.reply(ctx, id, b.notice(false))
+	default:
+		b.reply(ctx, uid, fmt.Sprintf("Чат <code>%d</code> дозволено як основний: зберігаю переписку, учасники можуть отримати ключ через /key.", id))
+		b.reply(ctx, id, b.notice(true))
+	}
+}
+
+// notice tells a newly allowed chat what the bot stores and who can read it.
+func (b *Bot) notice(main bool) string {
+	days := int(b.cfg.Retention.Hours() / 24)
+	s := fmt.Sprintf("Привіт! Я бот календаря групи Е2. Зберігаю текстові повідомлення цього чату %d днів, щоб учасники могли робити саммарі й знаходити дедлайни через Claude. Читати їх можуть лише учасники цього чату з персональним ключем; запис у календар — тільки в кількох людей, яким це дозволено.", days)
+	if main {
+		s += "\n\n/today, /week — розклад. Ключ для Claude — напиши мені в особисті /key."
+	}
+	return s
+}
+
+func (b *Bot) setWriter(ctx context.Context, uid int64, cmd, args string) {
+	id, err := strconv.ParseInt(strings.TrimSpace(args), 10, 64)
+	if err != nil {
+		b.reply(ctx, uid, "Формат: "+cmd+" 12 (ID ключа з /keys)")
+		return
+	}
+	k, err := b.store.GetKey(ctx, id)
+	if err != nil {
+		b.reply(ctx, uid, "Ключ не знайдено. Список — /keys")
+		return
+	}
+	if k.TGUserID == nil {
+		b.reply(ctx, uid, "Це ключ із консолі, він не прив'язаний до Telegram. Його право задається при створенні (app keys create … [--read]).")
+		return
+	}
+	on := cmd == "/grant"
+	if err := b.store.SetWriter(ctx, *k.TGUserID, k.Name, on); err != nil {
+		log.Printf("telegram: set writer: %v", err)
+		b.reply(ctx, uid, "Не вдалося змінити право, спробуй пізніше.")
+		return
+	}
+	if on {
+		b.reply(ctx, uid, fmt.Sprintf("%s тепер може додавати записи через Claude. Перевипускати ключ не треба.", html.EscapeString(k.Name)))
+	} else {
+		b.reply(ctx, uid, fmt.Sprintf("%s тепер має доступ тільки на читання.", html.EscapeString(k.Name)))
 	}
 }
 
@@ -505,13 +628,20 @@ func (b *Bot) allowedChats(ctx context.Context) ([]store.Chat, error) {
 // Enabled is always true for a running bot; it satisfies mcpserver.Members.
 func (b *Bot) Enabled() bool { return true }
 
-// IsMember reports whether the user is in at least one allowed chat.
+// IsMember reports whether the user is in at least one allowed main chat —
+// the condition for holding a key.
 func (b *Bot) IsMember(ctx context.Context, userID int64) (bool, error) {
 	chats, err := b.MemberChats(ctx, userID)
-	return len(chats) > 0, err
+	for _, c := range chats {
+		if c.Kind == store.ChatMain {
+			return true, err
+		}
+	}
+	return false, err
 }
 
-// MemberChats lists the allowed chats the user is currently in (cached per chat).
+// MemberChats lists the allowed chats, main and watch, the user is currently in
+// (cached per chat); this is what the user may read through MCP.
 func (b *Bot) MemberChats(ctx context.Context, userID int64) ([]store.Chat, error) {
 	chats, err := b.allowedChats(ctx)
 	if err != nil {
@@ -557,7 +687,7 @@ func (b *Bot) memberOf(ctx context.Context, chatID, userID int64) (bool, error) 
 	return member, nil
 }
 
-// memberLeft revokes the user's keys once they are in none of the allowed chats.
+// memberLeft revokes the user's keys once they are in none of the allowed main chats.
 func (b *Bot) memberLeft(ctx context.Context, chatID, userID int64) {
 	b.mu.Lock()
 	b.members[memberKey{chatID, userID}] = memberEntry{ok: false, at: time.Now()}
@@ -706,7 +836,7 @@ func (b *Bot) maybeRemind(ctx context.Context) {
 		return
 	}
 	for _, c := range chats {
-		if c.Reminders {
+		if c.Main() && c.Reminders {
 			b.reply(ctx, c.ID, text)
 		}
 	}

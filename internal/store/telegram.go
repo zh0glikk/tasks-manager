@@ -68,14 +68,20 @@ const (
 	ChatPending = "pending"
 	ChatAllowed = "allowed"
 	ChatDenied  = "denied"
+
+	ChatMain  = "main"  // members get keys, reminders and commands
+	ChatWatch = "watch" // messages are stored for members who already have a key
 )
 
 type Chat struct {
 	ID        int64
 	Title     string
 	Status    string
+	Kind      string
 	Reminders bool
 }
+
+func (c Chat) Main() bool { return c.Status == ChatAllowed && c.Kind == ChatMain }
 
 // TouchChat records a chat the bot has seen. A new chat starts as status and
 // created reports whether it was new; the title is kept up to date.
@@ -84,27 +90,27 @@ func (s *Store) TouchChat(ctx context.Context, id int64, title, status string) (
 	var created bool
 	err := s.db.QueryRow(ctx, `insert into tg_chats (chat_id, title, status) values ($1, $2, $3)
 		on conflict (chat_id) do update set title = case when excluded.title <> '' then excluded.title else tg_chats.title end
-		returning chat_id, title, status, reminders, (xmax = 0)`, id, title, status).
-		Scan(&c.ID, &c.Title, &c.Status, &c.Reminders, &created)
+		returning chat_id, title, status, kind, reminders, (xmax = 0)`, id, title, status).
+		Scan(&c.ID, &c.Title, &c.Status, &c.Kind, &c.Reminders, &created)
 	return c, created, err
 }
 
 func (s *Store) ListChats(ctx context.Context) ([]Chat, error) {
-	rows, err := s.db.Query(ctx, `select chat_id, title, status, reminders from tg_chats order by created_at`)
+	rows, err := s.db.Query(ctx, `select chat_id, title, status, kind, reminders from tg_chats order by created_at`)
 	if err != nil {
 		return nil, err
 	}
 	return collect(rows, func(row pgx.Row) (Chat, error) {
 		var c Chat
-		err := row.Scan(&c.ID, &c.Title, &c.Status, &c.Reminders)
+		err := row.Scan(&c.ID, &c.Title, &c.Status, &c.Kind, &c.Reminders)
 		return c, err
 	})
 }
 
 func (s *Store) GetChat(ctx context.Context, id int64) (Chat, error) {
 	var c Chat
-	err := s.db.QueryRow(ctx, `select chat_id, title, status, reminders from tg_chats where chat_id = $1`, id).
-		Scan(&c.ID, &c.Title, &c.Status, &c.Reminders)
+	err := s.db.QueryRow(ctx, `select chat_id, title, status, kind, reminders from tg_chats where chat_id = $1`, id).
+		Scan(&c.ID, &c.Title, &c.Status, &c.Kind, &c.Reminders)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c, ErrNotFound
 	}
@@ -123,6 +129,11 @@ func (s *Store) SetChatStatus(ctx context.Context, id int64, status string) erro
 	return nil
 }
 
+// AllowChat allows a chat as main or watch.
+func (s *Store) AllowChat(ctx context.Context, id int64, kind string) error {
+	return expectOne(s.db.Exec(ctx, `update tg_chats set status = 'allowed', kind = $2, updated_at = now() where chat_id = $1`, id, kind))
+}
+
 func (s *Store) SetChatReminders(ctx context.Context, id int64, on bool) error {
 	return expectOne(s.db.Exec(ctx, `update tg_chats set reminders = $2, updated_at = now() where chat_id = $1`, id, on))
 }
@@ -135,9 +146,9 @@ func (s *Store) MigrateChat(ctx context.Context, from, to int64) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `insert into tg_chats (chat_id, title, status, reminders)
-		select $2, title, status, reminders from tg_chats where chat_id = $1
-		on conflict (chat_id) do update set status = excluded.status, reminders = excluded.reminders, title = excluded.title`, from, to); err != nil {
+	if _, err := tx.Exec(ctx, `insert into tg_chats (chat_id, title, status, kind, reminders)
+		select $2, title, status, kind, reminders from tg_chats where chat_id = $1
+		on conflict (chat_id) do update set status = excluded.status, kind = excluded.kind, reminders = excluded.reminders, title = excluded.title`, from, to); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `update tg_messages m set chat_id = $2 where chat_id = $1
@@ -249,6 +260,50 @@ func (s *Store) LogAccess(ctx context.Context, keyID int64, tool string) error {
 	}
 	_, err := s.db.Exec(ctx, `update api_keys set last_used_at = now() where id = $1`, keyID)
 	return err
+}
+
+// ---- writers ----
+
+func (s *Store) IsWriter(ctx context.Context, tgUserID int64) (bool, error) {
+	var ok bool
+	err := s.db.QueryRow(ctx, `select exists(select 1 from tg_writers where tg_user_id = $1)`, tgUserID).Scan(&ok)
+	return ok, err
+}
+
+// SetWriter grants or removes write access for a Telegram user and updates
+// the scope of their active keys accordingly.
+func (s *Store) SetWriter(ctx context.Context, tgUserID int64, name string, on bool) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	scope := ScopeRead
+	if on {
+		scope = ScopeWrite
+		_, err = tx.Exec(ctx, `insert into tg_writers (tg_user_id, name) values ($1, $2)
+			on conflict (tg_user_id) do update set name = excluded.name`, tgUserID, name)
+	} else {
+		_, err = tx.Exec(ctx, `delete from tg_writers where tg_user_id = $1`, tgUserID)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `update api_keys set scope = $2 where tg_user_id = $1 and revoked_at is null`, tgUserID, scope); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) GetKey(ctx context.Context, id int64) (APIKey, error) {
+	var k APIKey
+	err := s.db.QueryRow(ctx, `select id, tg_user_id, name, scope, created_at, last_used_at from api_keys
+		where id = $1 and revoked_at is null`, id).
+		Scan(&k.ID, &k.TGUserID, &k.Name, &k.Scope, &k.CreatedAt, &k.LastUsedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return APIKey{}, ErrNotFound
+	}
+	return k, err
 }
 
 // ---- kv ----

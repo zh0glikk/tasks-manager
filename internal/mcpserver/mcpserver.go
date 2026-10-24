@@ -147,7 +147,7 @@ func (s *server) begin(ctx context.Context, req *mcp.CallToolRequest, write bool
 		return k, errors.New("не автентифіковано")
 	}
 	if write && !k.CanWrite() {
-		return k, errors.New("цей ключ дає тільки читання; для змін отримай ключ через /key у боті")
+		return k, errors.New("цей ключ дає тільки читання; право додавати записи дає адмін групи (команда /grant у боті)")
 	}
 	if err := s.Store.LogAccess(ctx, k.ID, req.Params.Name); err != nil {
 		log.Printf("mcp: log access: %v", err)

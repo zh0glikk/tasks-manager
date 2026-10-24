@@ -177,3 +177,14 @@ func (c *Client) GetChatMember(ctx context.Context, chatID, userID int64) (ChatM
 	err := c.call(ctx, "getChatMember", map[string]any{"chat_id": chatID, "user_id": userID}, &m)
 	return m, err
 }
+
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// SetMyCommands sets the command menu for a scope, e.g. {"type":"all_group_chats"}
+// or {"type":"chat","chat_id":123}.
+func (c *Client) SetMyCommands(ctx context.Context, cmds []BotCommand, scope map[string]any) error {
+	return c.call(ctx, "setMyCommands", map[string]any{"commands": cmds, "scope": scope}, nil)
+}
