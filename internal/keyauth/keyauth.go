@@ -5,14 +5,13 @@ package keyauth
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/zh0glikk/tasks-manager/internal/store"
 )
 
-// ErrInvalid means the key is unknown, revoked or its owner left the group.
+// ErrInvalid means the key is unknown, revoked, expired or its owner is not in a main chat.
 var ErrInvalid = errors.New("invalid key")
 
 // Members checks group membership; implemented by the Telegram bot.
@@ -26,8 +25,7 @@ type Verifier struct {
 	Members Members // nil when the bot isn't configured
 }
 
-// Verify resolves a token to an active key whose owner is still in the group.
-// A key of a user who left is revoked on the spot.
+// Verify resolves a token to an active key whose owner is in a main chat.
 func (v Verifier) Verify(ctx context.Context, token string) (store.APIKey, error) {
 	k, err := v.Store.KeyByToken(ctx, token)
 	if errors.Is(err, store.ErrNotFound) {
@@ -42,9 +40,8 @@ func (v Verifier) Verify(ctx context.Context, token string) (store.APIKey, error
 			return k, err
 		}
 		if !ok {
-			if _, err := v.Store.RevokeUserKeys(ctx, *k.TGUserID); err != nil {
-				log.Printf("keyauth: revoke keys of %d: %v", *k.TGUserID, err)
-			}
+			// Deny but keep the key: it works again if the person is back in a
+			// main chat. Keys are revoked only on an explicit leave event.
 			return k, ErrInvalid
 		}
 	}

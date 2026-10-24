@@ -39,6 +39,7 @@ type fakeTelegram struct {
 	mu      sync.Mutex
 	members map[int64]map[int64]string // chat id → user id → status
 	sent    []sent
+	chatErr string // when set, getChatMember fails with this chat-level error
 }
 
 type sent struct {
@@ -58,6 +59,10 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.sent = append(f.sent, sent{ChatID: int64(p["chat_id"].(float64)), Text: p["text"].(string)})
 		w.Write([]byte(`{"ok":true,"result":{}}`))
 	case "getChatMember":
+		if f.chatErr != "" {
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": 400, "description": f.chatErr})
+			return
+		}
 		status, ok := f.members[int64(p["chat_id"].(float64))][int64(p["user_id"].(float64))]
 		if !ok {
 			w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: user not found"}`))
@@ -294,7 +299,7 @@ func TestBotAndMCP(t *testing.T) {
 	}
 
 	// read-only key can read but not write
-	roKey, _, err := st.CreateKey(ctx, "Гість", nil, store.ScopeRead)
+	roKey, _, err := st.CreateKey(ctx, "Гість", nil, store.ScopeRead, store.KeyTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,17 +334,19 @@ func TestBotAndMCP(t *testing.T) {
 		t.Fatalf("/keys: %q", got)
 	}
 
-	// a new /key revokes the previous one and keeps the write grant
+	// a new /key adds a key and keeps the old one working (and the write grant)
 	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
 	newKey := keyRe.FindString(fake.last(t, irynaID))
 	if newKey == "" || newKey == key {
 		t.Fatal("no fresh key")
 	}
-	if !strings.Contains(fake.last(t, irynaID), "читання і запис") {
-		t.Fatalf("write grant lost on reissue: %q", fake.last(t, irynaID))
+	if got := fake.last(t, irynaID); !strings.Contains(got, "читання і запис") || !strings.Contains(got, "діє до") || !strings.Contains(got, "Активних ключів у тебе: 2") {
+		t.Fatalf("reissue reply: %q", got)
 	}
-	if _, err := connect(t, url, key); err == nil {
-		t.Fatal("old key still works")
+	if s, err := connect(t, url, key); err != nil {
+		t.Fatal("old key stopped working after /key")
+	} else {
+		s.Close()
 	}
 
 	// leaving the group revokes the key
@@ -355,9 +362,12 @@ func TestBotAndMCP(t *testing.T) {
 	if _, err := connect(t, url, newKey); err == nil {
 		t.Fatal("key works after leaving the group")
 	}
+	if _, err := connect(t, url, key); err == nil {
+		t.Fatal("older key works after leaving the group")
+	}
 }
 
-func TestMemberCheckRevokesWithoutLeaveEvent(t *testing.T) {
+func TestMemberCheckDeniesWithoutLeaveEvent(t *testing.T) {
 	st, bot, fake, _ := setup(t)
 	ctx := context.Background()
 
@@ -374,9 +384,75 @@ func TestMemberCheckRevokesWithoutLeaveEvent(t *testing.T) {
 	if _, err := connect(t, srv.URL, key); err == nil {
 		t.Fatal("kicked member's key still works")
 	}
-	if keys, _ := st.ListKeys(ctx); len(keys) != 0 {
-		t.Fatalf("key not revoked: %+v", keys)
+	// denied, not revoked: back in the chat, the same key works again
+	if keys, _ := st.ListKeys(ctx); len(keys) != 1 {
+		t.Fatalf("key revoked by a membership check: %+v", keys)
 	}
+	fake.setMember(groupID, maksymID, "member")
+	bot3 := telegram.New(telegram.Config{Token: "test", APIURL: strings.TrimSuffix(fakeURL(t, fake), "/"), ChatID: groupID}, st)
+	srv3 := httptest.NewServer(mcpserver.Handler(mcpserver.Deps{Store: st, Members: bot3}))
+	defer srv3.Close()
+	s, err := connect(t, srv3.URL, key)
+	if err != nil {
+		t.Fatal("key doesn't work after rejoining")
+	}
+	s.Close()
+}
+
+func TestKeyLimitsAndExpiry(t *testing.T) {
+	st, bot, fake, url := setup(t)
+	ctx := context.Background()
+
+	var keys []string
+	for range store.MaxKeysPerUser + 1 {
+		bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
+		keys = append(keys, keyRe.FindString(fake.last(t, irynaID)))
+	}
+	if _, err := connect(t, url, keys[0]); err == nil {
+		t.Fatal("oldest key survived the limit")
+	}
+	for _, k := range keys[1:] {
+		s, err := connect(t, url, k)
+		if err != nil {
+			t.Fatalf("key within the limit rejected: %v", err)
+		}
+		s.Close()
+	}
+	if n, _ := st.CountUserKeys(ctx, irynaID); n != store.MaxKeysPerUser {
+		t.Fatalf("active keys: %d", n)
+	}
+
+	// expired keys are rejected
+	expired, _, err := st.CreateKey(ctx, "Старий", nil, store.ScopeRead, -time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connect(t, url, expired); err == nil {
+		t.Fatal("expired key accepted")
+	}
+
+	// a chat-level Telegram error must not revoke or lock out keys for good
+	fake.mu.Lock()
+	fake.chatErr = "Bad Request: group chat was upgraded to a supergroup chat"
+	fake.mu.Unlock()
+	bot2 := telegram.New(telegram.Config{Token: "test", APIURL: strings.TrimSuffix(fakeURL(t, fake), "/"), ChatID: groupID}, st)
+	srv := httptest.NewServer(mcpserver.Handler(mcpserver.Deps{Store: st, Members: bot2}))
+	defer srv.Close()
+	if s, err := connect(t, srv.URL, keys[5]); err == nil {
+		s.Close()
+		t.Fatal("connected while membership couldn't be checked")
+	}
+	if n, _ := st.CountUserKeys(ctx, irynaID); n != store.MaxKeysPerUser {
+		t.Fatalf("chat error revoked keys: %d left", n)
+	}
+	fake.mu.Lock()
+	fake.chatErr = ""
+	fake.mu.Unlock()
+	s, err := connect(t, srv.URL, keys[5])
+	if err != nil {
+		t.Fatal("key doesn't work once Telegram answers again")
+	}
+	s.Close()
 }
 
 func keyID(t *testing.T, st *store.Store, name string) int64 {
@@ -751,7 +827,7 @@ func TestImportExport(t *testing.T) {
 	}
 
 	// visible through MCP to an admin console key
-	key, _, _ := st.CreateKey(ctx, "Адмін", nil, store.ScopeRead)
+	key, _, _ := st.CreateKey(ctx, "Адмін", nil, store.ScopeRead, store.KeyTTL)
 	s, err := connect(t, url, key)
 	if err != nil {
 		t.Fatal(err)

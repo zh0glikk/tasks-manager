@@ -354,8 +354,8 @@ const privateHelp = `Я бот календаря групи.
 <b>У чаті групи:</b> /today, /week — що на сьогодні й на тиждень; увечері нагадую про завтрашні дедлайни.
 
 <b>Тут, в особистих:</b>
-/key — персональний ключ для Claude (MCP): читати переписку чатів групи і календар. Додавати записи можуть лише ті, кому адмін дав право.
-/revoke — відкликати свій ключ
+/key — персональний ключ для Claude (MCP) і сайту, діє пів року: читати переписку чатів групи і календар. Додавати записи можуть лише ті, кому адмін дав право. Можна мати до 5 ключів (різні пристрої).
+/revoke — відкликати всі свої ключі
 
 Ключ видається учасникам основних чатів групи і перестає працювати, якщо вийти з них. Я зберігаю повідомлення обмежений час, щоб Claude міг робити саммарі; через Claude кожен бачить тільки ті чати, де він сам є.`
 
@@ -390,7 +390,7 @@ func (b *Bot) private(ctx context.Context, m *Message, cmd, args string) {
 			b.reply(ctx, uid, "Не вдалося відкликати ключ, спробуй пізніше.")
 			return
 		}
-		b.reply(ctx, uid, fmt.Sprintf("Відкликано ключів: %d.", n))
+		b.reply(ctx, uid, fmt.Sprintf("Відкликано всі твої ключі: %d. Новий — /key.", n))
 	case "/chatid":
 		b.reply(ctx, uid, fmt.Sprintf("Твій user_id: <code>%d</code>", uid))
 	case "/keys":
@@ -461,7 +461,7 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 			scope = store.ScopeWrite
 		}
 	}
-	key, k, err := b.store.CreateKey(ctx, m.From.DisplayName(), &uid, scope)
+	key, k, err := b.store.CreateKey(ctx, m.From.DisplayName(), &uid, scope, store.KeyTTL)
 	if err != nil {
 		log.Printf("telegram: create key: %v", err)
 		b.reply(ctx, uid, "Не вдалося створити ключ, спробуй пізніше.")
@@ -480,15 +480,20 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 		site = fmt.Sprintf("\n\nРедагувати сайт: <a href=\"%s/#key=%s\">увійти одним кліком</a> (або кнопка «Увійти» на сайті і цей ключ).",
 			html.EscapeString(strings.TrimRight(b.cfg.PublicURL, "/")), key)
 	}
-	b.reply(ctx, uid, fmt.Sprintf(`Твій ключ (%s):
+	active, err := b.store.CountUserKeys(ctx, uid)
+	if err != nil {
+		log.Printf("telegram: count keys: %v", err)
+	}
+	b.reply(ctx, uid, fmt.Sprintf(`Твій ключ (%s), діє до %s:
 
 <code>%s</code>
 
-Підключити в Claude Code:
-<code>claude mcp add --transport http e2 %s --header "Authorization: Bearer %s"</code>%s
+Підключити в Claude Code (один раз — ключ житиме пів року):
+<code>claude mcp add --scope user --transport http e2 %s --header "Authorization: Bearer %s"</code>%s
 
-Попередній ключ, якщо був, відкликано. Нікому не пересилай ключ і посилання та видали це повідомлення після використання. Новий ключ — /key, відкликати — /revoke.`,
-		access, key, html.EscapeString(url), key, site))
+Активних ключів у тебе: %d з %d — попередні продовжують працювати (наприклад, у Claude Code на іншому ноуті); коли їх більше %d, найстаріший відкликається. Відкликати всі — /revoke. Нікому не пересилай ключ і посилання та видали це повідомлення після використання.`,
+		access, k.ExpiresAt.In(b.cfg.Location).Format("02.01.2006"), key, html.EscapeString(url), key, site,
+		active, store.MaxKeysPerUser, store.MaxKeysPerUser))
 }
 
 func (b *Bot) listKeys(ctx context.Context) string {
@@ -510,7 +515,11 @@ func (b *Bot) listKeys(ctx context.Context) string {
 		if k.CanWrite() {
 			scope = "запис"
 		}
-		fmt.Fprintf(&sb, "#%d %s · %s · %s\n", k.ID, html.EscapeString(k.Name), scope, used)
+		until := ""
+		if k.ExpiresAt != nil {
+			until = " · до " + k.ExpiresAt.In(b.cfg.Location).Format("02.01.2006")
+		}
+		fmt.Fprintf(&sb, "#%d %s · %s · %s%s\n", k.ID, html.EscapeString(k.Name), scope, used, until)
 	}
 	sb.WriteString("\n/grant ID · /ungrant ID · /revokekey ID")
 	return sb.String()
@@ -680,14 +689,23 @@ func (b *Bot) MemberChats(ctx context.Context, userID int64) ([]store.Chat, erro
 		return nil, err
 	}
 	var out []store.Chat
+	var firstErr error
 	for _, c := range chats {
 		ok, err := b.memberOf(ctx, c.ID, userID)
 		if err != nil {
-			return nil, err
+			// one broken chat (e.g. bot removed) shouldn't lock people out of the others
+			log.Printf("telegram: member check %d in %d: %v", userID, c.ID, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if ok {
 			out = append(out, c)
 		}
+	}
+	if len(out) == 0 && firstErr != nil {
+		return nil, firstErr
 	}
 	return out, nil
 }
@@ -704,10 +722,11 @@ func (b *Bot) memberOf(ctx context.Context, chatID, userID int64) (bool, error) 
 	m, err := b.tg.GetChatMember(ctx, chatID, userID)
 	var apiErr *APIError
 	switch {
-	case errors.As(err, &apiErr) && apiErr.Code == 400:
-		// user never joined / not found
+	case errors.As(err, &apiErr) && userNotInChat(apiErr):
 		m = ChatMember{Status: "left"}
 	case err != nil:
+		// chat-level problems (bot removed, chat upgraded, outage) say nothing
+		// about the user: report an error instead of "not a member"
 		return false, err
 	}
 	member := m.Status == "creator" || m.Status == "administrator" || m.Status == "member" ||
@@ -717,6 +736,14 @@ func (b *Bot) memberOf(ctx context.Context, chatID, userID int64) (bool, error) 
 	b.members[key] = memberEntry{ok: member, at: time.Now()}
 	b.mu.Unlock()
 	return member, nil
+}
+
+// userNotInChat tells "this user isn't in the chat" apart from chat-level errors
+// such as "chat not found" or "group chat was upgraded to a supergroup chat".
+func userNotInChat(e *APIError) bool {
+	d := strings.ToLower(e.Description)
+	return e.Code == 400 && (strings.Contains(d, "user not found") || strings.Contains(d, "member not found") ||
+		strings.Contains(d, "participant_id_invalid"))
 }
 
 // memberLeft revokes the user's keys once they are in none of the allowed main chats.

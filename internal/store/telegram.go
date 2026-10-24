@@ -196,6 +196,9 @@ const (
 	ScopeRead  = "read"
 	ScopeWrite = "write"
 	keyPrefix  = "e2_"
+
+	KeyTTL         = 180 * 24 * time.Hour
+	MaxKeysPerUser = 5 // older ones are revoked when a new key is issued
 )
 
 type APIKey struct {
@@ -204,8 +207,20 @@ type APIKey struct {
 	Name       string
 	Scope      string
 	CreatedAt  time.Time
+	ExpiresAt  *time.Time
 	LastUsedAt *time.Time
 }
+
+const keyCols = `id, tg_user_id, name, scope, created_at, expires_at, last_used_at`
+
+func scanKey(row pgx.Row) (APIKey, error) {
+	var k APIKey
+	err := row.Scan(&k.ID, &k.TGUserID, &k.Name, &k.Scope, &k.CreatedAt, &k.ExpiresAt, &k.LastUsedAt)
+	return k, err
+}
+
+// activeKey is the SQL condition for a usable key.
+const activeKey = `revoked_at is null and (expires_at is null or expires_at > now())`
 
 func (k APIKey) CanWrite() bool { return k.Scope == ScopeWrite }
 
@@ -222,26 +237,30 @@ func newKey() string {
 	return keyPrefix + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 }
 
-// CreateKey issues a new key and returns it in plain text; it is not stored.
-// A Telegram user keeps a single active key: older ones are revoked.
-func (s *Store) CreateKey(ctx context.Context, name string, tgUserID *int64, scope string) (string, APIKey, error) {
+// CreateKey issues a new key valid for ttl and returns it in plain text; only
+// its hash is stored. A Telegram user may hold up to MaxKeysPerUser active keys
+// (e.g. Claude Code on two laptops and the website); the oldest ones beyond
+// that are revoked.
+func (s *Store) CreateKey(ctx context.Context, name string, tgUserID *int64, scope string, ttl time.Duration) (string, APIKey, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return "", APIKey{}, err
 	}
 	defer tx.Rollback(ctx)
 
-	if tgUserID != nil {
-		if _, err := tx.Exec(ctx, `update api_keys set revoked_at = now() where tg_user_id = $1 and revoked_at is null`, *tgUserID); err != nil {
-			return "", APIKey{}, err
-		}
-	}
 	plain := newKey()
-	k := APIKey{TGUserID: tgUserID, Name: name, Scope: scope}
-	err = tx.QueryRow(ctx, `insert into api_keys (tg_user_id, name, key_hash, scope) values ($1, $2, $3, $4) returning id, created_at`,
-		tgUserID, name, hashKey(plain), scope).Scan(&k.ID, &k.CreatedAt)
+	k, err := scanKey(tx.QueryRow(ctx, `insert into api_keys (tg_user_id, name, key_hash, scope, expires_at)
+		values ($1, $2, $3, $4, now() + $5 * interval '1 second') returning `+keyCols,
+		tgUserID, name, hashKey(plain), scope, int64(ttl.Seconds())))
 	if err != nil {
 		return "", APIKey{}, err
+	}
+	if tgUserID != nil {
+		if _, err := tx.Exec(ctx, `update api_keys set revoked_at = now() where id in (
+				select id from api_keys where tg_user_id = $1 and `+activeKey+`
+				order by created_at desc, id desc offset $2)`, *tgUserID, MaxKeysPerUser); err != nil {
+			return "", APIKey{}, err
+		}
 	}
 	return plain, k, tx.Commit(ctx)
 }
@@ -250,10 +269,7 @@ func (s *Store) KeyByToken(ctx context.Context, token string) (APIKey, error) {
 	if !strings.HasPrefix(strings.TrimSpace(token), keyPrefix) {
 		return APIKey{}, ErrNotFound
 	}
-	var k APIKey
-	err := s.db.QueryRow(ctx, `select id, tg_user_id, name, scope, created_at, last_used_at from api_keys
-		where key_hash = $1 and revoked_at is null`, hashKey(token)).
-		Scan(&k.ID, &k.TGUserID, &k.Name, &k.Scope, &k.CreatedAt, &k.LastUsedAt)
+	k, err := scanKey(s.db.QueryRow(ctx, `select `+keyCols+` from api_keys where key_hash = $1 and `+activeKey, hashKey(token)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return APIKey{}, ErrNotFound
 	}
@@ -261,16 +277,18 @@ func (s *Store) KeyByToken(ctx context.Context, token string) (APIKey, error) {
 }
 
 func (s *Store) ListKeys(ctx context.Context) ([]APIKey, error) {
-	rows, err := s.db.Query(ctx, `select id, tg_user_id, name, scope, created_at, last_used_at from api_keys
-		where revoked_at is null order by id`)
+	rows, err := s.db.Query(ctx, `select `+keyCols+` from api_keys where `+activeKey+` order by name, id`)
 	if err != nil {
 		return nil, err
 	}
-	return collect(rows, func(row pgx.Row) (APIKey, error) {
-		var k APIKey
-		err := row.Scan(&k.ID, &k.TGUserID, &k.Name, &k.Scope, &k.CreatedAt, &k.LastUsedAt)
-		return k, err
-	})
+	return collect(rows, scanKey)
+}
+
+// CountUserKeys returns how many active keys the Telegram user holds.
+func (s *Store) CountUserKeys(ctx context.Context, tgUserID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `select count(*) from api_keys where tg_user_id = $1 and `+activeKey, tgUserID).Scan(&n)
+	return n, err
 }
 
 func (s *Store) RevokeKey(ctx context.Context, id int64) error {
@@ -325,10 +343,7 @@ func (s *Store) SetWriter(ctx context.Context, tgUserID int64, name string, on b
 }
 
 func (s *Store) GetKey(ctx context.Context, id int64) (APIKey, error) {
-	var k APIKey
-	err := s.db.QueryRow(ctx, `select id, tg_user_id, name, scope, created_at, last_used_at from api_keys
-		where id = $1 and revoked_at is null`, id).
-		Scan(&k.ID, &k.TGUserID, &k.Name, &k.Scope, &k.CreatedAt, &k.LastUsedAt)
+	k, err := scanKey(s.db.QueryRow(ctx, `select `+keyCols+` from api_keys where id = $1 and `+activeKey, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return APIKey{}, ErrNotFound
 	}
