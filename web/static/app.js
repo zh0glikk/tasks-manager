@@ -63,6 +63,7 @@
     sel: today(),
     off: new Set(store.get('hiddenCourses', [])),
     authRequired: true,
+    botUsername: '',
     me: null, // {name, can_write} when logged in with a bot key
   };
   const canEdit = () => !state.authRequired || !!(state.me && state.me.can_write);
@@ -142,7 +143,11 @@
   }
   async function loadPosts() { state.posts = await api('GET', '/api/posts?limit=30'); }
   async function loadCourses() { state.courses = await api('GET', '/api/courses'); }
-  async function loadConfig() { state.authRequired = (await api('GET', '/api/config')).auth_required; }
+  async function loadConfig() {
+    const cfg = await api('GET', '/api/config');
+    state.authRequired = cfg.auth_required;
+    state.botUsername = /^[A-Za-z0-9_]{5,32}$/.test(cfg.bot_username || '') ? cfg.bot_username : '';
+  }
 
   async function reload() {
     try {
@@ -529,6 +534,12 @@
 
   // ---- login ----
   function openLogin() {
+    const bot = state.botUsername;
+    $('#bot-link').hidden = $('#bot-link-hint').hidden = !bot;
+    if (bot) {
+      $('#bot-link').href = `https://t.me/${bot}?start=key`;
+      $('#login-hint').innerHTML = `Або напиши <a href="https://t.me/${bot}" target="_blank" rel="noopener">@${bot}</a> в особисті <b>/key</b> і встав ключ сюди. Редагувати сайт можуть ті, кому адмін дав право запису; іншим ключ дає тільки перегляд.`;
+    }
     $('#login-key').value = '';
     $('#login-error').hidden = true;
     $('#login-dialog').showModal();

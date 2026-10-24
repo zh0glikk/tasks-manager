@@ -94,7 +94,11 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpserver.Handler(deps))
-	mux.Handle("/", api.New(st, web.Static(), api.Options{Auth: verifier, Open: open}))
+	apiOpts := api.Options{Auth: verifier, Open: open}
+	if bot != nil {
+		apiOpts.BotUsername = bot.Username
+	}
+	mux.Handle("/", api.New(st, web.Static(), apiOpts))
 
 	srv := &http.Server{
 		Addr:              ":" + port,

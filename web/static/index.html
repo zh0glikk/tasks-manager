@@ -106,9 +106,14 @@
       <h2 id="login-title">Увійти</h2>
       <button type="button" class="icon-btn" data-close aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </div>
+    <a class="btn primary tg-link" id="bot-link" href="#" target="_blank" rel="noopener" hidden>
+      <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 4 3 11l6 2 2 6 3-4 5 4z"/><path d="m9 13 8-6"/></svg>
+      Отримати ключ у Telegram
+    </a>
+    <p class="muted" id="bot-link-hint" hidden>Відкриється бот: натисни «Start», і він надішле ключ. Якщо в тебе є право редагувати — разом із посиланням «увійти одним кліком».</p>
     <label class="field">Ключ із Telegram-бота
       <input id="login-key" autocomplete="off" spellcheck="false" autocapitalize="none" placeholder="e2_…">
-      <span class="hint">Напиши боту групи в особисті <b>/key</b>. Редагувати сайт можуть ті, кому адмін дав право запису; іншим ключ дає тільки перегляд. Ключ збережеться в цьому браузері.</span>
+      <span class="hint" id="login-hint">Напиши боту групи в особисті <b>/key</b>. Редагувати сайт можуть ті, кому адмін дав право запису; іншим ключ дає тільки перегляд. Ключ збережеться в цьому браузері.</span>
     </label>
     <p class="form-error" id="login-error" role="alert" hidden></p>
     <div class="dlg-foot">

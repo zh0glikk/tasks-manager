@@ -39,8 +39,9 @@ type Bot struct {
 	store  *store.Store
 	admins map[int64]bool
 
-	mu      sync.Mutex
-	members map[memberKey]memberEntry
+	mu       sync.Mutex
+	members  map[memberKey]memberEntry
+	username string // learned via getMe
 }
 
 type memberKey struct{ chat, user int64 }
@@ -71,6 +72,14 @@ func New(cfg Config, s *store.Store) *Bot {
 func (b *Bot) Run(ctx context.Context) {
 	if err := b.Bootstrap(ctx); err != nil {
 		log.Printf("telegram: bootstrap: %v", err)
+	}
+	if me, err := b.tg.GetMe(ctx); err != nil {
+		log.Printf("telegram: getMe: %v", err)
+	} else {
+		b.mu.Lock()
+		b.username = me.Username
+		b.mu.Unlock()
+		log.Printf("telegram: running as @%s", me.Username)
 	}
 	b.setCommands(ctx)
 	if err := b.tg.DeleteWebhook(ctx); err != nil {
@@ -103,6 +112,13 @@ func (b *Bot) Run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// Username is the bot's @username without the @, or "" until it is known.
+func (b *Bot) Username() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.username
 }
 
 // Bootstrap marks the configured chat (if any) as allowed.
@@ -358,6 +374,13 @@ const adminHelp = `
 func (b *Bot) private(ctx context.Context, m *Message, cmd, args string) {
 	uid := m.From.ID
 	switch cmd {
+	case "/start":
+		// t.me/<bot>?start=key — the site's "get a key" link
+		if args == "key" {
+			b.issueKey(ctx, m, "")
+		} else {
+			b.reply(ctx, uid, b.helpFor(uid))
+		}
 	case "/key":
 		b.issueKey(ctx, m, args)
 	case "/revoke":
@@ -405,12 +428,15 @@ func (b *Bot) private(ctx context.Context, m *Message, cmd, args string) {
 		}
 		b.reply(ctx, uid, fmt.Sprintf("Ключ #%d відкликано.", id))
 	default:
-		help := privateHelp
-		if b.admins[uid] {
-			help += adminHelp
-		}
-		b.reply(ctx, uid, help)
+		b.reply(ctx, uid, b.helpFor(uid))
 	}
+}
+
+func (b *Bot) helpFor(uid int64) string {
+	if b.admins[uid] {
+		return privateHelp + adminHelp
+	}
+	return privateHelp
 }
 
 func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {

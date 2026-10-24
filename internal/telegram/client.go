@@ -188,3 +188,9 @@ type BotCommand struct {
 func (c *Client) SetMyCommands(ctx context.Context, cmds []BotCommand, scope map[string]any) error {
 	return c.call(ctx, "setMyCommands", map[string]any{"commands": cmds, "scope": scope}, nil)
 }
+
+func (c *Client) GetMe(ctx context.Context) (User, error) {
+	var u User
+	err := c.call(ctx, "getMe", map[string]any{}, &u)
+	return u, err
+}

@@ -32,6 +32,8 @@ type Options struct {
 	Auth keyauth.Verifier
 	// Open lets anyone edit without a key (local development only).
 	Open bool
+	// BotUsername returns the Telegram bot's username for the "get a key" link; may be nil.
+	BotUsername func() string
 }
 
 // New builds the HTTP handler. Reads are public; writes need a bot-issued key
@@ -43,7 +45,11 @@ func New(s *store.Store, static fs.FS, opts Options) http.Handler {
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]bool{"auth_required": !opts.Open})
+		bot := ""
+		if opts.BotUsername != nil {
+			bot = opts.BotUsername()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"auth_required": !opts.Open, "bot_username": bot})
 	})
 	mux.HandleFunc("GET /api/me", a.me)
 

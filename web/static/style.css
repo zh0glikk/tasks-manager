@@ -152,6 +152,8 @@ dialog form { display: flex; flex-direction: column; gap: 16px; }
 .check { display: flex; align-items: center; gap: 10px; min-height: 44px; font-size: 14px; flex-wrap: wrap; }
 .check input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent); }
 .check input[type="date"] { min-height: 40px; border: 1px solid var(--field); border-radius: 6px; padding: 0 8px; }
+.tg-link { justify-content: center; text-decoration: none; }
+.tg-link:hover { color: #fff; }
 .form-error { color: var(--due); font-size: 14px; background: var(--due-soft); padding: 10px 12px; border-radius: 6px; }
 .dlg-foot { display: flex; justify-content: flex-end; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 

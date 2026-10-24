@@ -623,6 +623,16 @@ func TestSiteAuth(t *testing.T) {
 		t.Fatalf("bogus key write: %d", code)
 	}
 
+	// the site's t.me/<bot>?start=key link issues a key; a bare /start shows help
+	bot.Handle(ctx, dm(maksymID, "Максим", "/start"))
+	if got := fake.last(t, maksymID); keyRe.MatchString(got) || !strings.Contains(got, "/key") {
+		t.Fatalf("/start: %q", got)
+	}
+	bot.Handle(ctx, dm(maksymID, "Максим", "/start key"))
+	if got := fake.last(t, maksymID); !keyRe.MatchString(got) {
+		t.Fatalf("/start key gave no key: %q", got)
+	}
+
 	// a read-only key logs in but can't edit, and gets no login link
 	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
 	reply := fake.last(t, irynaID)
