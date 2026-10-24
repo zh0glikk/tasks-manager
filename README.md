@@ -58,13 +58,56 @@ DATABASE_URL=postgres://tasks:tasks@localhost:5432/tasks?sslmode=disable go run 
 
 Локально з кодом: `EDIT_CODE=будь-який-код docker compose up --build`.
 
+## Telegram-бот і MCP для Claude
+
+**Бот** працює в чаті групи через long polling (вебхук не потрібен):
+- зберігає текстові повідомлення чату `CHAT_RETENTION_DAYS` днів (за замовчуванням 14), потім видаляє;
+- `/today`, `/week` у чаті, а о 20:00 (Київ) нагадує про завтрашні дедлайни;
+- в особистих `/key` видає персональний MCP-ключ, але тільки учасникам чату (перевіряє через `getChatMember`).
+  Вихід із групи автоматично відкликає ключ. Членство перевіряється ще й під час кожного звернення до MCP
+  (кеш на 10 хв), тож ключ не працюватиме, навіть якщо бот пропустив подію виходу;
+- для адмінів (`TELEGRAM_ADMIN_IDS`) є `/keys` і `/revokekey ID`.
+
+**MCP** живе на `/mcp` (streamable HTTP, stateless), доступ за заголовком `Authorization: Bearer e2_…`.
+- Інструменти: `chat_messages`, `calendar`, `upcoming_deadlines`, `news`, `courses`, `recent_changes`,
+  `add_deadline`, `update_deadline`, `add_news`, `add_event`. Інструментів для видалення немає.
+- У базі зберігається тільки SHA-256 ключа. Кожен виклик пишеться в `mcp_access`, а зміни потрапляють у журнал
+  змін з автором «Ім'я (через Claude)».
+- Ліміти: 120 викликів на хвилину на ключ і 300 на IP.
+
+Інструкція для учасників групи: [docs/CLAUDE.md](docs/CLAUDE.md).
+
+**Налаштування:**
+1. @BotFather → `/newbot`, потім `/setprivacy` → Disable (інакше бот бачить лише команди). Додай бота в чат групи.
+2. У чаті напиши `/chatid`, і бот відповість id групи. Свій user id дізнаєшся, написавши боту в особисті `/chatid`.
+3. Змінні в DigitalOcean (App → Settings → web → Environment Variables):
+
+| Змінна | Приклад | Примітка |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | `123:ABC…` | **Encrypt**. Без неї бот вимкнений, а MCP працює з ключами з CLI |
+| `TELEGRAM_CHAT_ID` | `-1001234567890` | id чату групи. Поки не задано, бот відповідає лише на `/chatid` |
+| `TELEGRAM_ADMIN_IDS` | `111,222` | хто бачить `/keys` |
+| `PUBLIC_URL` | `https://clownfish-app-lpt6d.ondigitalocean.app` | для посилань і команди підключення |
+| `CHAT_RETENTION_DAYS` | `14` | скільки днів зберігати повідомлення |
+
+Ключ без Telegram (для себе чи для тестів): у DO відкрий App → Console і виконай
+`/app keys create "Ім'я" [--read]`, а також `/app keys list` і `/app keys revoke ID`.
+
+Тести (потрібен Postgres): `TEST_DATABASE_URL=postgres://… go test ./...`. Вони проганяють бота з фейковим
+Telegram API і справжнього MCP-клієнта.
+
 ## Структура
 
 ```
 cmd/server/            точка входу: конфіг, міграції, HTTP-сервер
 internal/db/           підключення і вбудовані SQL-міграції
 internal/store/        запити до БД, журнал змін, відкат
-internal/api/          JSON API і валідація
+internal/api/          JSON API, код групи
+internal/validate/     перевірка даних (спільна для API і MCP)
+internal/telegram/     бот: збереження чату, ключі, /today, нагадування
+internal/mcpserver/    MCP-сервер для Claude
+internal/e2e/          інтеграційні тести бота і MCP
+docs/CLAUDE.md         як учасникам підключити Claude
 web/static/            UI (index.html, style.css, app.js)
 ```
 

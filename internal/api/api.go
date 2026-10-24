@@ -6,25 +6,19 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/zh0glikk/tasks-manager/internal/ratelimit"
 	"github.com/zh0glikk/tasks-manager/internal/store"
+	"github.com/zh0glikk/tasks-manager/internal/validate"
 )
 
 const (
 	maxSeries      = 60
 	writesPerIP    = 30
 	writesInterval = time.Minute
-)
-
-var (
-	reDate  = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
-	reTime  = regexp.MustCompile(`^\d{2}:\d{2}$`)
-	reColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 )
 
 type API struct {
@@ -67,7 +61,7 @@ func New(s *store.Store, static fs.FS, editCode string) http.Handler {
 
 	mux.Handle("GET /", http.FileServerFS(static))
 
-	return logRequests(guard(editCode, newLimiter(writesPerIP, writesInterval), mux))
+	return logRequests(guard(editCode, ratelimit.New(writesPerIP, writesInterval), mux))
 }
 
 // ---- handlers ----
@@ -230,88 +224,19 @@ func (a *API) revert(w http.ResponseWriter, r *http.Request) {
 
 // ---- validation ----
 
-func validCourse(w http.ResponseWriter, c *store.Course) bool {
-	trim(&c.Name, &c.Short, &c.Teacher, &c.Link, &c.Color)
-	if c.Color == "" {
-		c.Color = "#0E5D69"
-	}
-	return check(w,
-		rule(c.Name != "", "вкажіть назву предмета"),
-		rule(c.Short != "", "вкажіть коротку назву"),
-		maxLen(c.Name, 200, "назва"), maxLen(c.Short, 30, "коротка назва"), maxLen(c.Teacher, 200, "викладач"),
-		validLink(c.Link),
-		rule(reColor.MatchString(c.Color), "колір у форматі #RRGGBB"),
-	)
-}
-
-func validEvent(w http.ResponseWriter, e *store.Event) bool {
-	trim(&e.Kind, &e.Date, &e.StartTime, &e.EndTime, &e.Teacher, &e.Link, &e.Note)
-	return check(w,
-		rule(validDate(e.Date), "вкажіть дату"),
-		rule(reTime.MatchString(e.StartTime), "вкажіть час початку"),
-		rule(e.EndTime == "" || reTime.MatchString(e.EndTime), "неправильний час закінчення"),
-		rule(e.EndTime == "" || e.EndTime > e.StartTime, "кінець має бути пізніше початку"),
-		maxLen(e.Kind, 40, "тип"), maxLen(e.Teacher, 200, "викладач"), maxLen(e.Note, 1000, "примітка"),
-		validLink(e.Link),
-	)
-}
-
+func validCourse(w http.ResponseWriter, c *store.Course) bool { return valid(w, validate.Course(c)) }
+func validEvent(w http.ResponseWriter, e *store.Event) bool   { return valid(w, validate.Event(e)) }
 func validAssignment(w http.ResponseWriter, a *store.Assignment) bool {
-	trim(&a.Title, &a.Description, &a.DueDate, &a.DueTime, &a.Link)
-	return check(w,
-		rule(a.Title != "", "вкажіть, що треба зробити"),
-		maxLen(a.Title, 200, "назва"), maxLen(a.Description, 5000, "деталі"),
-		rule(validDate(a.DueDate), "вкажіть дату дедлайну"),
-		rule(a.DueTime == "" || reTime.MatchString(a.DueTime), "неправильний час"),
-		validLink(a.Link),
-	)
+	return valid(w, validate.Assignment(a))
 }
+func validPost(w http.ResponseWriter, p *store.Post) bool { return valid(w, validate.Post(p)) }
 
-func validPost(w http.ResponseWriter, p *store.Post) bool {
-	trim(&p.Title, &p.Body)
-	return check(w,
-		rule(p.Title != "", "вкажіть заголовок"),
-		maxLen(p.Title, 200, "заголовок"), maxLen(p.Body, 5000, "текст"),
-	)
-}
-
-func rule(ok bool, msg string) string {
-	if ok {
-		return ""
-	}
-	return msg
-}
-
-func maxLen(s string, n int, field string) string {
-	return rule(utf8.RuneCountInString(s) <= n, field+": не більше "+strconv.Itoa(n)+" символів")
-}
-
-func validLink(s string) string {
-	return rule(s == "" || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://"), "посилання має починатися з https://")
-}
-
-func validDate(s string) bool {
-	if !reDate.MatchString(s) {
+func valid(w http.ResponseWriter, err error) bool {
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
 		return false
 	}
-	_, err := time.Parse(time.DateOnly, s)
-	return err == nil
-}
-
-func check(w http.ResponseWriter, msgs ...string) bool {
-	for _, m := range msgs {
-		if m != "" {
-			fail(w, http.StatusBadRequest, m)
-			return false
-		}
-	}
 	return true
-}
-
-func trim(ss ...*string) {
-	for _, s := range ss {
-		*s = strings.TrimSpace(*s)
-	}
 }
 
 func author(s string) string {
@@ -344,7 +269,7 @@ func weekly(start, until string) ([]string, bool) {
 
 func dateRange(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 	from, to := r.URL.Query().Get("from"), r.URL.Query().Get("to")
-	if !validDate(from) || !validDate(to) {
+	if !validate.Date(from) || !validate.Date(to) {
 		fail(w, http.StatusBadRequest, "from і to мають бути у форматі YYYY-MM-DD")
 		return "", "", false
 	}

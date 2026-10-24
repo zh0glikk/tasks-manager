@@ -23,3 +23,17 @@ services:
         scope: RUN_TIME
         type: SECRET
         value: postgresql://USER:PASSWORD@HOST.eu-central-1.aws.neon.tech/neondb?sslmode=require
+      # Telegram bot + MCP (see README). The bot stays off until the token is set.
+      - key: TELEGRAM_BOT_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: "123456:BOT_TOKEN_FROM_BOTFATHER"
+      - key: TELEGRAM_CHAT_ID
+        scope: RUN_TIME
+        value: "-100XXXXXXXXXX"
+      - key: TELEGRAM_ADMIN_IDS
+        scope: RUN_TIME
+        value: "YOUR_TELEGRAM_USER_ID"
+      - key: PUBLIC_URL
+        scope: RUN_TIME
+        value: https://clownfish-app-lpt6d.ondigitalocean.app
