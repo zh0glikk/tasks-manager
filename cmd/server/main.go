@@ -77,7 +77,7 @@ func main() {
 		if !migrateUntilDone(ctx, pool, &ready) || bot == nil {
 			return
 		}
-		log.Printf("telegram bot started (chat %d)", bot.ChatID())
+		log.Print("telegram bot started")
 		bot.Run(ctx)
 	}()
 

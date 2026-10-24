@@ -34,12 +34,12 @@ func (s *Store) SaveMessage(ctx context.Context, m ChatMessage) error {
 	return err
 }
 
-func (s *Store) ListMessages(ctx context.Context, chatID int64, since, until time.Time, limit int) ([]ChatMessage, error) {
+func (s *Store) ListMessages(ctx context.Context, chatIDs []int64, since, until time.Time, limit int) ([]ChatMessage, error) {
 	// newest `limit` messages in the window, returned oldest first
 	rows, err := s.db.Query(ctx, `select chat_id, message_id, coalesce(from_id, 0), from_name, text, reply_to, sent_at, edited_at from (
-			select * from tg_messages where chat_id = $1 and sent_at >= $2 and sent_at < $3
+			select * from tg_messages where chat_id = any($1) and sent_at >= $2 and sent_at < $3
 			order by sent_at desc, message_id desc limit $4
-		) m order by sent_at, message_id`, chatID, since, until, limit)
+		) m order by sent_at, message_id`, chatIDs, since, until, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -60,6 +60,94 @@ func (s *Store) Purge(ctx context.Context, before time.Time) (int64, error) {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// ---- chats ----
+
+const (
+	ChatPending = "pending"
+	ChatAllowed = "allowed"
+	ChatDenied  = "denied"
+)
+
+type Chat struct {
+	ID        int64
+	Title     string
+	Status    string
+	Reminders bool
+}
+
+// TouchChat records a chat the bot has seen. A new chat starts as status and
+// created reports whether it was new; the title is kept up to date.
+func (s *Store) TouchChat(ctx context.Context, id int64, title, status string) (Chat, bool, error) {
+	var c Chat
+	var created bool
+	err := s.db.QueryRow(ctx, `insert into tg_chats (chat_id, title, status) values ($1, $2, $3)
+		on conflict (chat_id) do update set title = case when excluded.title <> '' then excluded.title else tg_chats.title end
+		returning chat_id, title, status, reminders, (xmax = 0)`, id, title, status).
+		Scan(&c.ID, &c.Title, &c.Status, &c.Reminders, &created)
+	return c, created, err
+}
+
+func (s *Store) ListChats(ctx context.Context) ([]Chat, error) {
+	rows, err := s.db.Query(ctx, `select chat_id, title, status, reminders from tg_chats order by created_at`)
+	if err != nil {
+		return nil, err
+	}
+	return collect(rows, func(row pgx.Row) (Chat, error) {
+		var c Chat
+		err := row.Scan(&c.ID, &c.Title, &c.Status, &c.Reminders)
+		return c, err
+	})
+}
+
+func (s *Store) GetChat(ctx context.Context, id int64) (Chat, error) {
+	var c Chat
+	err := s.db.QueryRow(ctx, `select chat_id, title, status, reminders from tg_chats where chat_id = $1`, id).
+		Scan(&c.ID, &c.Title, &c.Status, &c.Reminders)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return c, ErrNotFound
+	}
+	return c, err
+}
+
+// SetChatStatus changes a chat's status; denying a chat also deletes its stored messages.
+func (s *Store) SetChatStatus(ctx context.Context, id int64, status string) error {
+	if err := expectOne(s.db.Exec(ctx, `update tg_chats set status = $2, updated_at = now() where chat_id = $1`, id, status)); err != nil {
+		return err
+	}
+	if status == ChatDenied {
+		_, err := s.db.Exec(ctx, `delete from tg_messages where chat_id = $1`, id)
+		return err
+	}
+	return nil
+}
+
+func (s *Store) SetChatReminders(ctx context.Context, id int64, on bool) error {
+	return expectOne(s.db.Exec(ctx, `update tg_chats set reminders = $2, updated_at = now() where chat_id = $1`, id, on))
+}
+
+// MigrateChat moves a group that became a supergroup to its new id, keeping
+// its status, settings and stored messages.
+func (s *Store) MigrateChat(ctx context.Context, from, to int64) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `insert into tg_chats (chat_id, title, status, reminders)
+		select $2, title, status, reminders from tg_chats where chat_id = $1
+		on conflict (chat_id) do update set status = excluded.status, reminders = excluded.reminders, title = excluded.title`, from, to); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `update tg_messages m set chat_id = $2 where chat_id = $1
+		and not exists (select 1 from tg_messages x where x.chat_id = $2 and x.message_id = m.message_id)`, from, to); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `delete from tg_chats where chat_id = $1`, from); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ---- api keys ----

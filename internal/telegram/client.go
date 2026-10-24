@@ -82,6 +82,7 @@ type Update struct {
 	Message       *Message           `json:"message"`
 	EditedMessage *Message           `json:"edited_message"`
 	ChatMember    *ChatMemberUpdated `json:"chat_member"`
+	MyChatMember  *ChatMemberUpdated `json:"my_chat_member"`
 }
 
 type User struct {
@@ -119,6 +120,7 @@ type Message struct {
 	Caption        string          `json:"caption"`
 	ReplyTo        *Message        `json:"reply_to_message"`
 	LeftChatMember *User           `json:"left_chat_member"`
+	MigrateToChat  int64           `json:"migrate_to_chat_id"`
 	NewChatMembers []User          `json:"new_chat_members"`
 	Photo          json.RawMessage `json:"photo"`
 	Video          json.RawMessage `json:"video"`
@@ -152,7 +154,7 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout int) ([]U
 	err := c.call(ctx, "getUpdates", map[string]any{
 		"offset":          offset,
 		"timeout":         timeout,
-		"allowed_updates": []string{"message", "edited_message", "chat_member"},
+		"allowed_updates": []string{"message", "edited_message", "chat_member", "my_chat_member"},
 	}, &out)
 	return out, err
 }

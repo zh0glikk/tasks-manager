@@ -33,7 +33,7 @@ const (
 // fakeTelegram records sent messages and answers getChatMember from members.
 type fakeTelegram struct {
 	mu      sync.Mutex
-	members map[int64]string // user id → status
+	members map[int64]map[int64]string // chat id → user id → status
 	sent    []sent
 }
 
@@ -54,7 +54,7 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.sent = append(f.sent, sent{ChatID: int64(p["chat_id"].(float64)), Text: p["text"].(string)})
 		w.Write([]byte(`{"ok":true,"result":{}}`))
 	case "getChatMember":
-		status, ok := f.members[int64(p["user_id"].(float64))]
+		status, ok := f.members[int64(p["chat_id"].(float64))][int64(p["user_id"].(float64))]
 		if !ok {
 			w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: user not found"}`))
 			return
@@ -78,10 +78,13 @@ func (f *fakeTelegram) last(t *testing.T, chatID int64) string {
 	return ""
 }
 
-func (f *fakeTelegram) setMember(id int64, status string) {
+func (f *fakeTelegram) setMember(chat, id int64, status string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.members[id] = status
+	if f.members[chat] == nil {
+		f.members[chat] = map[int64]string{}
+	}
+	f.members[chat][id] = status
 }
 
 func setup(t *testing.T) (*store.Store, *telegram.Bot, *fakeTelegram, string) {
@@ -103,7 +106,9 @@ func setup(t *testing.T) (*store.Store, *telegram.Bot, *fakeTelegram, string) {
 	}
 	st := store.New(pool)
 
-	fake := &fakeTelegram{members: map[int64]string{irynaID: "member", maksymID: "administrator", adminID: "creator"}}
+	fake := &fakeTelegram{members: map[int64]map[int64]string{
+		groupID: {irynaID: "member", maksymID: "administrator", adminID: "creator"},
+	}}
 	tg := httptest.NewServer(fake)
 	t.Cleanup(tg.Close)
 
@@ -112,6 +117,9 @@ func setup(t *testing.T) (*store.Store, *telegram.Bot, *fakeTelegram, string) {
 		Token: "test", APIURL: tg.URL, ChatID: groupID, Admins: []int64{adminID},
 		PublicURL: "https://e2.example", Retention: 14 * 24 * time.Hour, Location: loc,
 	}, st)
+	if err := bot.Bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	srv := httptest.NewServer(mcpserver.Handler(mcpserver.Deps{Store: st, Members: bot, Location: loc}))
 	t.Cleanup(srv.Close)
@@ -119,9 +127,13 @@ func setup(t *testing.T) (*store.Store, *telegram.Bot, *fakeTelegram, string) {
 }
 
 func groupMsg(id int64, from int64, name, text string) telegram.Update {
+	return chatMsg(groupID, "Е2 Аспірантура", id, from, name, text)
+}
+
+func chatMsg(chat int64, title string, id int64, from int64, name, text string) telegram.Update {
 	return telegram.Update{UpdateID: id, Message: &telegram.Message{
 		MessageID: id, From: &telegram.User{ID: from, FirstName: name},
-		Chat: telegram.Chat{ID: groupID, Type: "supergroup"}, Date: time.Now().Unix(), Text: text,
+		Chat: telegram.Chat{ID: chat, Type: "supergroup", Title: title}, Date: time.Now().Unix(), Text: text,
 	}}
 }
 
@@ -212,7 +224,7 @@ func TestBotAndMCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 10 {
+	if len(tools.Tools) != 11 {
 		t.Fatalf("got %d tools", len(tools.Tools))
 	}
 
@@ -312,7 +324,7 @@ func TestBotAndMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	s2.Close()
-	fake.setMember(irynaID, "left")
+	fake.setMember(groupID, irynaID, "left")
 	left := groupMsg(14, irynaID, "Ірина", "")
 	left.Message.LeftChatMember = &telegram.User{ID: irynaID, FirstName: "Ірина"}
 	bot.Handle(ctx, left)
@@ -328,8 +340,11 @@ func TestMemberCheckRevokesWithoutLeaveEvent(t *testing.T) {
 	bot.Handle(ctx, dm(maksymID, "Максим", "/key"))
 	key := keyRe.FindString(fake.last(t, maksymID))
 	// the bot missed the leave event; a fresh membership check must catch it
-	fake.setMember(maksymID, "kicked")
+	fake.setMember(groupID, maksymID, "kicked")
 	bot2 := telegram.New(telegram.Config{Token: "test", APIURL: strings.TrimSuffix(fakeURL(t, fake), "/"), ChatID: groupID}, st)
+	if err := bot2.Bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(mcpserver.Handler(mcpserver.Deps{Store: st, Members: bot2}))
 	defer srv.Close()
 	if _, err := connect(t, srv.URL, key); err == nil {
@@ -344,4 +359,119 @@ func fakeURL(t *testing.T, f *fakeTelegram) string {
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+func TestMultipleChats(t *testing.T) {
+	st, bot, fake, url := setup(t)
+	ctx := context.Background()
+	const englishID, basicID, migratedID = int64(-1005555), int64(-777), int64(-1007777)
+
+	// a new chat waits for an admin; its messages aren't stored meanwhile
+	bot.Handle(ctx, chatMsg(englishID, "Англійська гр.5", 1, maksymID, "Максим", "секретне до підтвердження"))
+	if got := fake.last(t, adminID); !strings.Contains(got, "/allow -1005555") || !strings.Contains(got, "Англійська гр.5") {
+		t.Fatalf("admin not asked: %q", got)
+	}
+	bot.Handle(ctx, chatMsg(englishID, "Англійська гр.5", 2, maksymID, "Максим", "/today"))
+	for _, m := range fake.sent {
+		if m.ChatID == englishID {
+			t.Fatalf("bot answered in a pending chat: %q", m.Text)
+		}
+	}
+	// a non-admin can't approve
+	bot.Handle(ctx, dm(irynaID, "Ірина", "/allow -1005555"))
+	if c, _ := st.GetChat(ctx, englishID); c.Status != store.ChatPending {
+		t.Fatalf("non-admin changed status to %s", c.Status)
+	}
+	bot.Handle(ctx, dm(adminID, "Адмін", "/allow -1005555"))
+	if got := fake.last(t, adminID); !strings.Contains(got, "дозволено") {
+		t.Fatalf("/allow: %q", got)
+	}
+	bot.Handle(ctx, chatMsg(englishID, "Англійська гр.5", 3, maksymID, "Максим", "Unit 4 до четверга"))
+	bot.Handle(ctx, groupMsg(4, irynaID, "Ірина", "привіт з основного чату"))
+
+	// Ірина is only in the main chat, Максим is in both, Олег only in the English chat
+	const olehID = int64(444)
+	fake.setMember(englishID, maksymID, "member")
+	fake.setMember(englishID, olehID, "member")
+
+	bot.Handle(ctx, dm(olehID, "Олег", "/key"))
+	olehKey := keyRe.FindString(fake.last(t, olehID))
+	if olehKey == "" {
+		t.Fatalf("member of the second chat got no key: %q", fake.last(t, olehID))
+	}
+	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
+	irynaKey := keyRe.FindString(fake.last(t, irynaID))
+	bot.Handle(ctx, dm(maksymID, "Максим", "/key"))
+	maksymKey := keyRe.FindString(fake.last(t, maksymID))
+
+	read := func(key string, args map[string]any) string {
+		s, err := connect(t, url, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		out, isErr := call(t, s, "chat_messages", args)
+		if isErr {
+			t.Fatalf("chat_messages: %q", out)
+		}
+		return out
+	}
+	if out := read(olehKey, nil); !strings.Contains(out, "Unit 4") || strings.Contains(out, "основного чату") || strings.Contains(out, "секретне") {
+		t.Fatalf("Олег sees: %q", out)
+	}
+	if out := read(irynaKey, nil); strings.Contains(out, "Unit 4") || !strings.Contains(out, "основного чату") {
+		t.Fatalf("Ірина sees: %q", out)
+	}
+	out := read(maksymKey, nil)
+	if !strings.Contains(out, "[Англійська гр.5] Максим: Unit 4") || !strings.Contains(out, "[Е2 Аспірантура] Ірина") {
+		t.Fatalf("Максим sees: %q", out)
+	}
+	if out := read(maksymKey, map[string]any{"chat": "англ"}); strings.Contains(out, "основного чату") || !strings.Contains(out, "Unit 4") {
+		t.Fatalf("chat filter: %q", out)
+	}
+
+	// leaving one chat keeps the key while the user is still in another
+	fake.setMember(groupID, maksymID, "left")
+	left := groupMsg(5, maksymID, "Максим", "")
+	left.Message.LeftChatMember = &telegram.User{ID: maksymID}
+	bot.Handle(ctx, left)
+	if s, err := connect(t, url, maksymKey); err != nil {
+		t.Fatal("key revoked though still in the English chat")
+	} else {
+		s.Close()
+	}
+
+	// denying a chat deletes its history and hides it
+	bot.Handle(ctx, dm(adminID, "Адмін", "/deny -1005555"))
+	if s, err := connect(t, url, olehKey); err == nil {
+		s.Close()
+		t.Fatal("Олег still connects after his only chat was denied")
+	}
+	msgs, _ := st.ListMessages(ctx, []int64{englishID}, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), 100)
+	if len(msgs) != 0 {
+		t.Fatalf("denied chat history kept: %d messages", len(msgs))
+	}
+
+	// a basic group upgraded to a supergroup keeps its status and history
+	bot.Handle(ctx, dm(adminID, "Адмін", "/chatid"))
+	bot.Handle(ctx, telegram.Update{Message: &telegram.Message{MessageID: 1, From: &telegram.User{ID: irynaID, FirstName: "Ірина"},
+		Chat: telegram.Chat{ID: basicID, Type: "group", Title: "Тест"}, Date: time.Now().Unix(), Text: "до міграції"}})
+	bot.Handle(ctx, dm(adminID, "Адмін", "/allow -777"))
+	bot.Handle(ctx, telegram.Update{Message: &telegram.Message{MessageID: 2, From: &telegram.User{ID: irynaID, FirstName: "Ірина"},
+		Chat: telegram.Chat{ID: basicID, Type: "group", Title: "Тест"}, Date: time.Now().Unix(), Text: "збережено"}})
+	bot.Handle(ctx, telegram.Update{Message: &telegram.Message{MessageID: 3, Chat: telegram.Chat{ID: basicID, Type: "group"},
+		Date: time.Now().Unix(), MigrateToChat: migratedID}})
+	c, err := st.GetChat(ctx, migratedID)
+	if err != nil || c.Status != store.ChatAllowed {
+		t.Fatalf("migrated chat: %+v %v", c, err)
+	}
+	msgs, _ = st.ListMessages(ctx, []int64{migratedID}, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), 100)
+	if len(msgs) != 1 || msgs[0].Text != "збережено" {
+		t.Fatalf("history not moved: %+v", msgs)
+	}
+
+	bot.Handle(ctx, dm(adminID, "Адмін", "/chats"))
+	if got := fake.last(t, adminID); !strings.Contains(got, "-1007777") || !strings.Contains(got, "заборонено") {
+		t.Fatalf("/chats: %q", got)
+	}
 }

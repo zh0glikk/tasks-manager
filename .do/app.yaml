@@ -28,6 +28,7 @@ services:
         scope: RUN_TIME
         type: SECRET
         value: "123456:BOT_TOKEN_FROM_BOTFATHER"
+      # optional: a chat allowed from the start; other chats are approved via /allow
       - key: TELEGRAM_CHAT_ID
         scope: RUN_TIME
         value: "-100XXXXXXXXXX"

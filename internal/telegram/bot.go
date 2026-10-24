@@ -26,7 +26,7 @@ const (
 type Config struct {
 	Token     string
 	APIURL    string // override for tests
-	ChatID    int64  // the group chat; 0 until configured
+	ChatID    int64  // optional chat that is allowed from the start; others are approved by an admin
 	Admins    []int64
 	PublicURL string
 	Retention time.Duration
@@ -40,8 +40,10 @@ type Bot struct {
 	admins map[int64]bool
 
 	mu      sync.Mutex
-	members map[int64]memberEntry
+	members map[memberKey]memberEntry
 }
+
+type memberKey struct{ chat, user int64 }
 
 type memberEntry struct {
 	ok bool
@@ -61,14 +63,15 @@ func New(cfg Config, s *store.Store) *Bot {
 		tg:      NewClient(cfg.Token, cfg.APIURL),
 		store:   s,
 		admins:  admins,
-		members: map[int64]memberEntry{},
+		members: map[memberKey]memberEntry{},
 	}
 }
 
-func (b *Bot) ChatID() int64 { return b.cfg.ChatID }
-
 // Run polls Telegram for updates until ctx is done.
 func (b *Bot) Run(ctx context.Context) {
+	if err := b.Bootstrap(ctx); err != nil {
+		log.Printf("telegram: bootstrap: %v", err)
+	}
 	if err := b.tg.DeleteWebhook(ctx); err != nil {
 		log.Printf("telegram: deleteWebhook: %v", err)
 	}
@@ -101,6 +104,17 @@ func (b *Bot) Run(ctx context.Context) {
 	}
 }
 
+// Bootstrap marks the configured chat (if any) as allowed.
+func (b *Bot) Bootstrap(ctx context.Context) error {
+	if b.cfg.ChatID == 0 {
+		return nil
+	}
+	if _, _, err := b.store.TouchChat(ctx, b.cfg.ChatID, "", store.ChatAllowed); err != nil {
+		return err
+	}
+	return b.store.SetChatStatus(ctx, b.cfg.ChatID, store.ChatAllowed)
+}
+
 func (b *Bot) loadOffset(ctx context.Context) int64 {
 	v, err := b.store.GetKV(ctx, "tg_offset")
 	if err != nil {
@@ -128,10 +142,40 @@ func (b *Bot) handle(ctx context.Context, u Update) {
 		b.handleMessage(ctx, u.Message, false)
 	case u.EditedMessage != nil:
 		b.handleMessage(ctx, u.EditedMessage, true)
-	case u.ChatMember != nil && u.ChatMember.Chat.ID == b.cfg.ChatID:
-		if s := u.ChatMember.NewChatMember.Status; s == "left" || s == "kicked" {
-			b.memberLeft(ctx, u.ChatMember.NewChatMember.User.ID)
+	case u.MyChatMember != nil:
+		// the bot itself was added to (or removed from) a chat
+		if s := u.MyChatMember.NewChatMember.Status; s == "member" || s == "administrator" {
+			b.seeChat(ctx, u.MyChatMember.Chat)
 		}
+	case u.ChatMember != nil:
+		if s := u.ChatMember.NewChatMember.Status; s == "left" || s == "kicked" {
+			if c, err := b.store.GetChat(ctx, u.ChatMember.Chat.ID); err == nil && c.Status == store.ChatAllowed {
+				b.memberLeft(ctx, c.ID, u.ChatMember.NewChatMember.User.ID)
+			}
+		}
+	}
+}
+
+func isGroup(c Chat) bool { return c.Type == "group" || c.Type == "supergroup" }
+
+// seeChat records a group the bot is in; a new one is announced to the admins.
+func (b *Bot) seeChat(ctx context.Context, tc Chat) store.Chat {
+	c, created, err := b.store.TouchChat(ctx, tc.ID, tc.Title, store.ChatPending)
+	if err != nil {
+		log.Printf("telegram: touch chat %d: %v", tc.ID, err)
+		return store.Chat{ID: tc.ID, Status: store.ChatPending}
+	}
+	if created {
+		log.Printf("telegram: new chat %d %q, waiting for an admin", tc.ID, tc.Title)
+		b.notifyAdmins(ctx, fmt.Sprintf("Мене додали в чат «%s» (<code>%d</code>).\n\nДозволити зберігати його переписку і видавати ключі його учасникам?\n/allow %d — так\n/deny %d — ні",
+			html.EscapeString(tc.Title), tc.ID, tc.ID, tc.ID))
+	}
+	return c
+}
+
+func (b *Bot) notifyAdmins(ctx context.Context, text string) {
+	for id := range b.admins {
+		b.reply(ctx, id, text)
 	}
 }
 
@@ -142,17 +186,30 @@ func (b *Bot) handleMessage(ctx context.Context, m *Message, edited bool) {
 		if !edited && m.From != nil {
 			b.private(ctx, m, cmd, args)
 		}
-	case b.cfg.ChatID != 0 && m.Chat.ID == b.cfg.ChatID:
+	case isGroup(m.Chat):
+		if m.MigrateToChat != 0 {
+			// the group became a supergroup and got a new id
+			if err := b.store.MigrateChat(ctx, m.Chat.ID, m.MigrateToChat); err != nil {
+				log.Printf("telegram: migrate chat %d → %d: %v", m.Chat.ID, m.MigrateToChat, err)
+			} else {
+				log.Printf("telegram: chat %d migrated to %d", m.Chat.ID, m.MigrateToChat)
+			}
+			return
+		}
+		c := b.seeChat(ctx, m.Chat)
+		if c.Status != store.ChatAllowed {
+			if cmd == "/chatid" {
+				b.reply(ctx, m.Chat.ID, fmt.Sprintf("chat_id цього чату: <code>%d</code>. Чат ще не підтверджений адміном бота.", m.Chat.ID))
+			}
+			return
+		}
 		if m.LeftChatMember != nil {
-			b.memberLeft(ctx, m.LeftChatMember.ID)
+			b.memberLeft(ctx, c.ID, m.LeftChatMember.ID)
 		}
 		b.save(ctx, m)
 		if !edited {
 			b.group(ctx, m, cmd)
 		}
-	case cmd == "/chatid":
-		// lets the admin find the group id before TELEGRAM_CHAT_ID is set
-		b.reply(ctx, m.Chat.ID, fmt.Sprintf("chat_id цього чату: <code>%d</code>", m.Chat.ID))
 	}
 }
 
@@ -244,7 +301,7 @@ const privateHelp = `Я бот календаря групи.
 /key read — ключ тільки для читання
 /revoke — відкликати свій ключ
 
-Ключ видається тільки учасникам чату групи і перестає працювати, якщо вийти з групи. Я зберігаю повідомлення групи обмежений час, щоб Claude міг робити саммарі.`
+Ключ видається тільки учасникам чатів групи і перестає працювати, якщо вийти з них. Я зберігаю повідомлення обмежений час, щоб Claude міг робити саммарі; через Claude кожен бачить тільки ті чати, де він сам є.`
 
 func (b *Bot) private(ctx context.Context, m *Message, cmd, args string) {
 	uid := m.From.ID
@@ -265,6 +322,18 @@ func (b *Bot) private(ctx context.Context, m *Message, cmd, args string) {
 		if b.admins[uid] {
 			b.reply(ctx, uid, b.listKeys(ctx))
 		}
+	case "/chats":
+		if b.admins[uid] {
+			b.reply(ctx, uid, b.listChats(ctx))
+		}
+	case "/allow", "/deny":
+		if b.admins[uid] {
+			b.setChatStatus(ctx, uid, cmd, args)
+		}
+	case "/reminders":
+		if b.admins[uid] {
+			b.setReminders(ctx, uid, args)
+		}
 	case "/revokekey":
 		if !b.admins[uid] {
 			return
@@ -280,16 +349,16 @@ func (b *Bot) private(ctx context.Context, m *Message, cmd, args string) {
 		}
 		b.reply(ctx, uid, fmt.Sprintf("Ключ #%d відкликано.", id))
 	default:
-		b.reply(ctx, uid, privateHelp)
+		help := privateHelp
+		if b.admins[uid] {
+			help += "\n\n<b>Адмін:</b> /chats — чати бота, /allow ID, /deny ID, /reminders ID on|off, /keys, /revokekey ID"
+		}
+		b.reply(ctx, uid, help)
 	}
 }
 
 func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 	uid := m.From.ID
-	if b.cfg.ChatID == 0 {
-		b.reply(ctx, uid, "Бот ще не підключений до чату групи. Спробуй пізніше.")
-		return
-	}
 	ok, err := b.IsMember(ctx, uid)
 	if err != nil {
 		log.Printf("telegram: member check %d: %v", uid, err)
@@ -297,7 +366,7 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 		return
 	}
 	if !ok {
-		b.reply(ctx, uid, "Ключ видається тільки учасникам чату групи.")
+		b.reply(ctx, uid, "Ключ видається тільки учасникам чатів групи, до яких підключений бот.")
 		return
 	}
 	scope := store.ScopeWrite
@@ -350,18 +419,127 @@ func (b *Bot) listKeys(ctx context.Context) string {
 	return sb.String()
 }
 
+// ---- chats (admin) ----
+
+func (b *Bot) listChats(ctx context.Context) string {
+	chats, err := b.store.ListChats(ctx)
+	if err != nil {
+		return "Помилка: " + html.EscapeString(err.Error())
+	}
+	if len(chats) == 0 {
+		return "Мене ще не додали в жоден чат."
+	}
+	labels := map[string]string{store.ChatAllowed: "дозволено", store.ChatPending: "чекає рішення", store.ChatDenied: "заборонено"}
+	var sb strings.Builder
+	sb.WriteString("<b>Чати</b>\n")
+	for _, c := range chats {
+		rem := ""
+		if c.Status == store.ChatAllowed && !c.Reminders {
+			rem = " · без нагадувань"
+		}
+		fmt.Fprintf(&sb, "<code>%d</code> %s · %s%s\n", c.ID, html.EscapeString(c.Title), labels[c.Status], rem)
+	}
+	sb.WriteString("\n/allow ID · /deny ID · /reminders ID on|off")
+	return sb.String()
+}
+
+func (b *Bot) setChatStatus(ctx context.Context, uid int64, cmd, args string) {
+	id, err := strconv.ParseInt(args, 10, 64)
+	if err != nil {
+		b.reply(ctx, uid, "Формат: "+cmd+" -1001234567890 (id — з /chats)")
+		return
+	}
+	status := store.ChatAllowed
+	if cmd == "/deny" {
+		status = store.ChatDenied
+	}
+	if err := b.store.SetChatStatus(ctx, id, status); err != nil {
+		b.reply(ctx, uid, "Чат не знайдено. Список — /chats")
+		return
+	}
+	b.mu.Lock()
+	for k := range b.members {
+		if k.chat == id {
+			delete(b.members, k)
+		}
+	}
+	b.mu.Unlock()
+	if status == store.ChatAllowed {
+		b.reply(ctx, uid, fmt.Sprintf("Чат <code>%d</code> дозволено: зберігаю переписку, учасники можуть отримати ключ через /key.", id))
+	} else {
+		b.reply(ctx, uid, fmt.Sprintf("Чат <code>%d</code> заборонено, збережену переписку з нього видалено.", id))
+	}
+}
+
+func (b *Bot) setReminders(ctx context.Context, uid int64, args string) {
+	idStr, mode, _ := strings.Cut(args, " ")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	on := strings.TrimSpace(mode) == "on"
+	if err != nil || (!on && strings.TrimSpace(mode) != "off") {
+		b.reply(ctx, uid, "Формат: /reminders -1001234567890 on|off")
+		return
+	}
+	if err := b.store.SetChatReminders(ctx, id, on); err != nil {
+		b.reply(ctx, uid, "Чат не знайдено. Список — /chats")
+		return
+	}
+	b.reply(ctx, uid, fmt.Sprintf("Нагадування в чаті <code>%d</code>: %s.", id, map[bool]string{true: "увімкнено", false: "вимкнено"}[on]))
+}
+
+func (b *Bot) allowedChats(ctx context.Context) ([]store.Chat, error) {
+	chats, err := b.store.ListChats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := chats[:0]
+	for _, c := range chats {
+		if c.Status == store.ChatAllowed {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 // ---- membership ----
 
-// IsMember reports whether the user is currently in the group chat (cached).
+// Enabled is always true for a running bot; it satisfies mcpserver.Members.
+func (b *Bot) Enabled() bool { return true }
+
+// IsMember reports whether the user is in at least one allowed chat.
 func (b *Bot) IsMember(ctx context.Context, userID int64) (bool, error) {
+	chats, err := b.MemberChats(ctx, userID)
+	return len(chats) > 0, err
+}
+
+// MemberChats lists the allowed chats the user is currently in (cached per chat).
+func (b *Bot) MemberChats(ctx context.Context, userID int64) ([]store.Chat, error) {
+	chats, err := b.allowedChats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []store.Chat
+	for _, c := range chats {
+		ok, err := b.memberOf(ctx, c.ID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (b *Bot) memberOf(ctx context.Context, chatID, userID int64) (bool, error) {
+	key := memberKey{chatID, userID}
 	b.mu.Lock()
-	e, ok := b.members[userID]
+	e, ok := b.members[key]
 	b.mu.Unlock()
 	if ok && time.Since(e.at) < memberCacheTTL {
 		return e.ok, nil
 	}
 
-	m, err := b.tg.GetChatMember(ctx, b.cfg.ChatID, userID)
+	m, err := b.tg.GetChatMember(ctx, chatID, userID)
 	var apiErr *APIError
 	switch {
 	case errors.As(err, &apiErr) && apiErr.Code == 400:
@@ -374,19 +552,23 @@ func (b *Bot) IsMember(ctx context.Context, userID int64) (bool, error) {
 		(m.Status == "restricted" && m.IsMember)
 
 	b.mu.Lock()
-	b.members[userID] = memberEntry{ok: member, at: time.Now()}
+	b.members[key] = memberEntry{ok: member, at: time.Now()}
 	b.mu.Unlock()
 	return member, nil
 }
 
-func (b *Bot) memberLeft(ctx context.Context, userID int64) {
+// memberLeft revokes the user's keys once they are in none of the allowed chats.
+func (b *Bot) memberLeft(ctx context.Context, chatID, userID int64) {
 	b.mu.Lock()
-	b.members[userID] = memberEntry{ok: false, at: time.Now()}
+	b.members[memberKey{chatID, userID}] = memberEntry{ok: false, at: time.Now()}
 	b.mu.Unlock()
+	if still, err := b.IsMember(ctx, userID); err != nil || still {
+		return
+	}
 	if n, err := b.store.RevokeUserKeys(ctx, userID); err != nil {
 		log.Printf("telegram: revoke keys of %d: %v", userID, err)
 	} else if n > 0 {
-		log.Printf("telegram: user %d left the group, revoked %d key(s)", userID, n)
+		log.Printf("telegram: user %d left the group chats, revoked %d key(s)", userID, n)
 	}
 }
 
@@ -503,7 +685,7 @@ func (b *Bot) housekeeping(ctx context.Context) {
 // maybeRemind posts tomorrow's deadlines to the group once a day at reminderHour.
 func (b *Bot) maybeRemind(ctx context.Context) {
 	now := time.Now().In(b.cfg.Location)
-	if b.cfg.ChatID == 0 || now.Hour() != reminderHour {
+	if now.Hour() != reminderHour {
 		return
 	}
 	today := now.Format(time.DateOnly)
@@ -514,8 +696,19 @@ func (b *Bot) maybeRemind(ctx context.Context) {
 		log.Printf("telegram: reminder: %v", err)
 		return
 	}
-	if text := b.Reminder(ctx); text != "" {
-		b.reply(ctx, b.cfg.ChatID, text)
+	text := b.Reminder(ctx)
+	if text == "" {
+		return
+	}
+	chats, err := b.allowedChats(ctx)
+	if err != nil {
+		log.Printf("telegram: reminder: %v", err)
+		return
+	}
+	for _, c := range chats {
+		if c.Reminders {
+			b.reply(ctx, c.ID, text)
+		}
 	}
 }
 
