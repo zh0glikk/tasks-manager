@@ -348,7 +348,7 @@
         <span class="kind">${shortDate(l.date)} · ${esc(c.short)} · ${duration(l.duration_s)}</span>
         <h3>${esc(l.title)}</h3>
         ${l.summary ? `<p class="lec-sum">${esc(l.summary)}</p>`
-          : `<p class="muted">Конспекту ще немає. Попроси Claude: «зроби конспект лекції #${l.id} і збережи».</p>`}
+          : `<p class="muted">Конспекту ще немає.</p>`}
         <div class="meta">
           <span class="lec-actions">
             ${l.segments ? `<button type="button" class="btn small primary" data-lecture="${l.id}">Транскрипт і конспект</button>` : ''}
