@@ -334,36 +334,22 @@ func TestBotAndMCP(t *testing.T) {
 		t.Fatalf("/keys: %q", got)
 	}
 
-	// a new /key adds a key and keeps the old one working (and the write grant)
+	// /key again shows the same key, now with the write grant
 	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
-	newKey := keyRe.FindString(fake.last(t, irynaID))
-	if newKey == "" || newKey == key {
-		t.Fatal("no fresh key")
+	if got := fake.last(t, irynaID); keyRe.FindString(got) != key || !strings.Contains(got, "читання і запис") || !strings.Contains(got, "діє до") {
+		t.Fatalf("second /key: %q", got)
 	}
-	if got := fake.last(t, irynaID); !strings.Contains(got, "читання і запис") || !strings.Contains(got, "діє до") || !strings.Contains(got, "Активних ключів у тебе: 2") {
-		t.Fatalf("reissue reply: %q", got)
-	}
-	if s, err := connect(t, url, key); err != nil {
-		t.Fatal("old key stopped working after /key")
-	} else {
-		s.Close()
+	if n, _ := st.CountUserKeys(ctx, irynaID); n != 1 {
+		t.Fatalf("active keys after second /key: %d", n)
 	}
 
 	// leaving the group revokes the key
-	s2, err := connect(t, url, newKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s2.Close()
 	fake.setMember(groupID, irynaID, "left")
 	left := groupMsg(14, irynaID, "Ірина", "")
 	left.Message.LeftChatMember = &telegram.User{ID: irynaID, FirstName: "Ірина"}
 	bot.Handle(ctx, left)
-	if _, err := connect(t, url, newKey); err == nil {
-		t.Fatal("key works after leaving the group")
-	}
 	if _, err := connect(t, url, key); err == nil {
-		t.Fatal("older key works after leaving the group")
+		t.Fatal("key works after leaving the group")
 	}
 }
 
@@ -403,10 +389,27 @@ func TestKeyLimitsAndExpiry(t *testing.T) {
 	st, bot, fake, url := setup(t)
 	ctx := context.Background()
 
+	// /revoke and /key give a new key and the old one stops working
+	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
+	first := keyRe.FindString(fake.last(t, irynaID))
+	bot.Handle(ctx, dm(irynaID, "Ірина", "/revoke"))
+	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
+	if got := keyRe.FindString(fake.last(t, irynaID)); got == "" || got == first {
+		t.Fatalf("/key after /revoke: %q", got)
+	}
+	if _, err := connect(t, url, first); err == nil {
+		t.Fatal("revoked key still works")
+	}
+
+	// keys created directly still respect the per-person limit
+	uid := irynaID
 	var keys []string
 	for range store.MaxKeysPerUser + 1 {
-		bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
-		keys = append(keys, keyRe.FindString(fake.last(t, irynaID)))
+		k, _, err := st.CreateKey(ctx, "Ірина", &uid, store.ScopeRead, store.KeyTTL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, k)
 	}
 	if _, err := connect(t, url, keys[0]); err == nil {
 		t.Fatal("oldest key survived the limit")

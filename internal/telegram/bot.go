@@ -354,7 +354,7 @@ const privateHelp = `Я бот календаря групи.
 <b>У чаті групи:</b> /today, /week — що на сьогодні й на тиждень; увечері нагадую про завтрашні дедлайни.
 
 <b>Тут, в особистих:</b>
-/key — персональний ключ для Claude (MCP) і сайту, діє пів року: читати переписку чатів групи і календар. Додавати записи можуть лише ті, кому адмін дав право. Можна мати до 5 ключів (різні пристрої).
+/key — персональний ключ для Claude (MCP) і сайту, діє пів року: читати переписку чатів групи і календар. Додавати записи можуть лише ті, кому адмін дав право. Ключ один на всі пристрої: /key щоразу показує його ж.
 /revoke — відкликати всі свої ключі
 
 Ключ видається учасникам основних чатів групи і перестає працювати, якщо вийти з них. Я зберігаю повідомлення обмежений час, щоб Claude міг робити саммарі; через Claude кожен бачить тільки ті чати, де він сам є.`
@@ -461,7 +461,11 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 			scope = store.ScopeWrite
 		}
 	}
-	key, k, err := b.store.CreateKey(ctx, m.From.DisplayName(), &uid, scope, store.KeyTTL)
+	// one key per person: show the stored one again, create only if there is none
+	key, k, err := b.store.UserKey(ctx, uid, store.KeyTTL)
+	if errors.Is(err, store.ErrNotFound) {
+		key, k, err = b.store.CreateKey(ctx, m.From.DisplayName(), &uid, scope, store.KeyTTL)
+	}
 	if err != nil {
 		log.Printf("telegram: create key: %v", err)
 		b.reply(ctx, uid, "Не вдалося створити ключ, спробуй пізніше.")
@@ -480,10 +484,6 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 		site = fmt.Sprintf("\n\nРедагувати сайт: <a href=\"%s/#key=%s\">увійти одним кліком</a> (або кнопка «Увійти» на сайті і цей ключ).",
 			html.EscapeString(strings.TrimRight(b.cfg.PublicURL, "/")), key)
 	}
-	active, err := b.store.CountUserKeys(ctx, uid)
-	if err != nil {
-		log.Printf("telegram: count keys: %v", err)
-	}
 	b.reply(ctx, uid, fmt.Sprintf(`Твій ключ (%s), діє до %s:
 
 <code>%s</code>
@@ -491,9 +491,8 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 Підключити в Claude Code (один раз — ключ житиме пів року):
 <code>claude mcp add --scope user --transport http e2 %s --header "Authorization: Bearer %s"</code>%s
 
-Активних ключів у тебе: %d з %d — попередні продовжують працювати (наприклад, у Claude Code на іншому ноуті); коли їх більше %d, найстаріший відкликається. Відкликати всі — /revoke. Нікому не пересилай ключ і посилання та видали це повідомлення після використання.`,
-		access, k.ExpiresAt.In(b.cfg.Location).Format("02.01.2006"), key, html.EscapeString(url), key, site,
-		active, store.MaxKeysPerUser, store.MaxKeysPerUser))
+Це твій ключ для всіх пристроїв: /key щоразу покаже його ж і продовжить ще на пів року. Якщо ключ потрапив до чужих — /revoke, потім /key видасть новий. Нікому не пересилай ключ і посилання та видали це повідомлення після використання.`,
+		access, k.ExpiresAt.In(b.cfg.Location).Format("02.01.2006"), key, html.EscapeString(url), key, site))
 }
 
 func (b *Bot) listKeys(ctx context.Context) string {
@@ -629,7 +628,7 @@ func (b *Bot) setWriter(ctx context.Context, uid int64, cmd, args string) {
 	}
 	if on {
 		b.reply(ctx, uid, fmt.Sprintf("%s тепер може редагувати сайт і додавати записи через Claude. Перевипускати ключ не треба.", html.EscapeString(k.Name)))
-		b.reply(ctx, *k.TGUserID, "Тобі дали право редагувати календар групи: на сайті (кнопка «Увійти» і твій ключ) і через Claude. Посилання для входу одним кліком — /key (видасть новий ключ).")
+		b.reply(ctx, *k.TGUserID, "Тобі дали право редагувати календар групи: на сайті (кнопка «Увійти» і твій ключ) і через Claude. Посилання для входу одним кліком — /key.")
 	} else {
 		b.reply(ctx, uid, fmt.Sprintf("%s тепер має доступ тільки на перегляд.", html.EscapeString(k.Name)))
 	}
