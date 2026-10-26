@@ -233,7 +233,7 @@ func TestBotAndMCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 11 {
+	if len(tools.Tools) != 15 {
 		t.Fatalf("got %d tools", len(tools.Tools))
 	}
 

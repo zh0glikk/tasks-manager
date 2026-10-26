@@ -64,6 +64,36 @@ func Post(p *store.Post) error {
 	)
 }
 
+const MaxSegments = 20000 // about 30 hours of speech
+
+func Lecture(l *store.Lecture) error {
+	trim(&l.Date, &l.Title, &l.VideoURL, &l.Summary)
+	return first(
+		rule(Date(l.Date), "вкажіть дату запису у форматі YYYY-MM-DD"),
+		rule(l.Title != "", "вкажіть тему лекції"),
+		maxLen(l.Title, 200, "тема"), maxLen(l.Summary, 20000, "конспект"),
+		rule(l.DurationS >= 0, "тривалість не може бути від'ємною"),
+		link(l.VideoURL),
+	)
+}
+
+func Segments(segs []store.Segment) error {
+	if len(segs) > MaxSegments {
+		return errors.New("транскрипт: не більше " + strconv.Itoa(MaxSegments) + " шматків")
+	}
+	for i := range segs {
+		s := &segs[i]
+		s.Text = strings.TrimSpace(s.Text)
+		if s.Start < 0 || s.End < s.Start {
+			return errors.New("транскрипт: шматок " + strconv.Itoa(i) + " має неправильні таймкоди")
+		}
+		if err := maxLen(s.Text, 2000, "транскрипт: шматок "+strconv.Itoa(i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Date reports whether s is a real calendar date in YYYY-MM-DD form.
 func Date(s string) bool {
 	if !reDate.MatchString(s) {

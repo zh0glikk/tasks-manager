@@ -10,6 +10,7 @@
   const KINDS = ['лекція', 'практичне', 'семінар', 'консультація', 'лабораторна', 'залік', 'іспит'];
   const GENERAL = { id: null, name: 'Загальне', short: 'Загальне', teacher: '', link: '', color: '#7C867F' };
   const MAX_PILLS = 4;
+  const MAX_LECTURES = 6;
 
   // ---- dates ----
   const pad = (n) => String(n).padStart(2, '0');
@@ -37,6 +38,14 @@
     if (days < 7) return days + ' ' + plural(days, 'день', 'дні', 'днів') + ' тому';
     return d.getDate() + ' ' + MN[d.getMonth()];
   };
+  const clock = (sec) => {
+    const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
+    return (h ? h + ':' + pad(m) : pad(m)) + ':' + pad(s);
+  };
+  const duration = (sec) => {
+    const h = Math.floor(sec / 3600), m = Math.round(sec / 60) % 60;
+    return h ? h + ' год ' + m + ' хв' : Math.round(sec / 60) + ' хв';
+  };
   const stamp = (ts) => {
     const d = new Date(ts), k = iso(d), hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
     if (k === today()) return 'сьогодні<br>' + hm;
@@ -48,6 +57,15 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const safeUrl = (u) => /^https?:\/\//i.test(u || '') ? u : '';
   const safeColor = (c) => /^#[0-9a-f]{6}$/i.test(c || '') ? c : GENERAL.color;
+  // only YouTube links can open at a moment of the video
+  const timeLink = (video, sec) => {
+    try {
+      const u = new URL(video);
+      if (!/^(www\.|m\.)?(youtube\.com|youtu\.be)$/.test(u.hostname)) return '';
+      u.searchParams.set('t', String(sec));
+      return u.toString();
+    } catch { return ''; }
+  };
 
   // ---- storage (best effort) ----
   const store = {
@@ -58,7 +76,8 @@
   // ---- state ----
   const now = new Date();
   const state = {
-    courses: [], events: [], assignments: [], upcoming: [], posts: [],
+    courses: [], events: [], assignments: [], upcoming: [], posts: [], lectures: [],
+    lecAll: false,
     month: new Date(now.getFullYear(), now.getMonth(), 1),
     sel: today(),
     off: new Set(store.get('hiddenCourses', [])),
@@ -67,6 +86,8 @@
     me: null, // {name, can_write} when logged in with a bot key
   };
   const canEdit = () => !state.authRequired || !!(state.me && state.me.can_write);
+  // lectures are for group members: any key, read-only included
+  const isMember = () => !state.authRequired || !!state.me;
 
   const courseOf = (id) => state.courses.find((c) => c.id === id) || GENERAL;
   const cvars = (c) => { const col = safeColor(c.color); return `--c:${col};--cs:${col}1f`; };
@@ -97,6 +118,7 @@
   function logout() {
     store.set('key', '');
     state.me = null;
+    state.lectures = [];
     render();
     toast('Ти вийшов');
   }
@@ -143,6 +165,7 @@
   }
   async function loadPosts() { state.posts = await api('GET', '/api/posts?limit=30'); }
   async function loadCourses() { state.courses = await api('GET', '/api/courses'); }
+  async function loadLectures() { state.lectures = isMember() ? await api('GET', '/api/lectures') : []; }
   async function loadConfig() {
     const cfg = await api('GET', '/api/config');
     state.authRequired = cfg.auth_required;
@@ -152,6 +175,7 @@
   async function reload() {
     try {
       await Promise.all([loadConfig(), loadMe(), loadCourses(), loadMonth(), loadUpcoming(), loadPosts()]);
+      await loadLectures();
     } catch (e) {
       toast('Не вдалося завантажити: ' + e.message, true);
     }
@@ -166,6 +190,7 @@
     renderCalendar();
     renderDay();
     renderNews();
+    renderLectures();
     renderCourses();
   }
 
@@ -248,7 +273,11 @@
 
     let html = `<div class="panel-head"><h3>${longDate(k)}${k === today() ? ' · сьогодні' : ''}</h3>
       <button type="button" class="link-btn edit-only" data-add-on="${k}">+ додати на цей день</button></div>`;
-    if (!dls.length && !evs.length) html += '<p class="muted">Нічого не заплановано.</p>';
+    const recs = state.lectures.filter((l) => l.date === k && visible(l.course_id));
+    const recOf = (e) => recs.filter((l) => l.event_id === e.id || (l.event_id == null && e.course_id != null && l.course_id === e.course_id));
+    const loose = recs.filter((l) => !evs.some((e) => recOf(e).includes(l)));
+    const recBtn = (l) => `<button type="button" class="rec-link" data-lecture="${l.id}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg>Запис і транскрипт</button>`;
+    if (!dls.length && !evs.length && !loose.length) html += '<p class="muted">Нічого не заплановано.</p>';
     html += dls.map((a) => {
       const c = courseOf(a.course_id), link = safeUrl(a.link);
       return `<div class="item due">
@@ -271,7 +300,18 @@
           ${(e.teacher || c.teacher) ? `<span class="sub">${esc(e.teacher || c.teacher)}</span>` : ''}
           ${e.note ? `<span class="desc">${esc(e.note)}</span>` : ''}
           ${link ? `<a href="${esc(link)}" target="_blank" rel="noopener" class="sub">${esc(link.replace(/^https?:\/\//, ''))}</a>` : ''}
+          ${recOf(e).map(recBtn).join('')}
         </div>${actions('event', e.id)}</div>`;
+    }).join('');
+    html += loose.map((l) => {
+      const c = courseOf(l.course_id);
+      return `<div class="item" style="${cvars(c)}">
+        <span class="t">${duration(l.duration_s)}</span>
+        <div class="body">
+          <span class="kind">Запис · ${esc(c.short)}</span>
+          <span class="nm">${esc(l.title)}</span>
+          ${recBtn(l)}
+        </div></div>`;
     }).join('');
     $('#day').innerHTML = html;
   }
@@ -297,6 +337,98 @@
         </div>
       </article>`;
     }).join('');
+  }
+
+  function renderLectures() {
+    $('#lec-search').hidden = !isMember();
+    if (!isMember()) {
+      $('#lec-hits').hidden = true;
+      $('#lectures').innerHTML = '<div class="empty-card">Записи пар і транскрипти бачать лише учасники групи. <button type="button" class="link-btn" data-login>Увійти з ключем із бота</button></div>';
+      return;
+    }
+    const list = state.lectures.filter((l) => visible(l.course_id));
+    if (!list.length) {
+      $('#lectures').innerHTML = '<div class="empty-card">Записів ще немає. Їх додають утилітою <code>lecture</code> (див. README).</div>';
+      return;
+    }
+    const shown = state.lecAll ? list : list.slice(0, MAX_LECTURES);
+    $('#lectures').innerHTML = shown.map((l) => {
+      const c = courseOf(l.course_id), video = safeUrl(l.video_url);
+      return `<article class="lec" style="${cvars(c)}">
+        <span class="kind">${shortDate(l.date)} · ${esc(c.short)} · ${duration(l.duration_s)}</span>
+        <h3>${esc(l.title)}</h3>
+        ${l.summary ? `<p class="lec-sum">${esc(l.summary)}</p>`
+          : `<p class="muted">Конспекту ще немає. Попроси Claude: «зроби конспект лекції #${l.id} і збережи».</p>`}
+        <div class="meta">
+          <span class="lec-actions">
+            ${l.segments ? `<button type="button" class="btn small primary" data-lecture="${l.id}">Транскрипт і конспект</button>` : ''}
+            ${video ? `<a class="btn small" href="${esc(video)}" target="_blank" rel="noopener">Відео</a>` : ''}
+          </span>
+          <span class="item-actions edit-only">
+            <button type="button" class="link-btn" data-act="edit" data-type="lecture" data-id="${l.id}">Змінити</button>
+            <button type="button" class="link-btn danger" data-act="delete" data-type="lecture" data-id="${l.id}">Видалити</button>
+          </span>
+        </div>
+      </article>`;
+    }).join('') + (list.length > MAX_LECTURES ? `<button type="button" class="link-btn" data-lec-all>${state.lecAll ? 'Згорнути' : 'Усі записи (' + list.length + ')'}</button>` : '');
+  }
+
+  // ---- lectures ----
+  const lecture = { data: null };
+
+  async function openLecture(id, at) {
+    try {
+      lecture.data = await api('GET', '/api/lectures/' + id);
+    } catch (e) {
+      return toast(e.message, true);
+    }
+    const l = lecture.data.lecture, c = courseOf(l.course_id), video = safeUrl(l.video_url);
+    $('#lecture-title').textContent = l.title;
+    $('#lecture-meta').innerHTML = `${longDate(l.date)} · ${esc(c.short)} · ${duration(l.duration_s)}` +
+      (video ? ` · <a href="${esc(video)}" target="_blank" rel="noopener">відео</a>` : '');
+    // [MM:SS] in the summary jumps to that place in the transcript
+    $('#lecture-summary').innerHTML = l.summary
+      ? '<h3>Конспект</h3><p>' + esc(l.summary).replace(/\[(\d{1,2}(?::\d{2}){1,2})\]/g, (m, tc) =>
+        `<button type="button" class="tc" data-seek="${tc.split(':').reduce((a, b) => a * 60 + Number(b), 0)}">${tc}</button>`) + '</p>'
+      : '';
+    $('#lecture-filter').value = '';
+    $('#transcript').innerHTML = lecture.data.transcript.map((sg) => {
+      const href = safeUrl(timeLink(l.video_url, sg.start));
+      const tc = href ? `<a class="tc" href="${esc(href)}" target="_blank" rel="noopener" title="Відкрити відео з цього місця">${clock(sg.start)}</a>` : `<span class="tc">${clock(sg.start)}</span>`;
+      return `<li data-s="${sg.start}">${tc}<span>${esc(sg.text)}</span></li>`;
+    }).join('');
+    if (!$('#lecture-dialog').open) $('#lecture-dialog').showModal();
+    if (at != null) seek(at);
+  }
+
+  function seek(sec) {
+    const rows = [...$('#transcript').children];
+    const row = rows.filter((li) => Number(li.dataset.s) <= sec).pop() || rows[0];
+    if (!row) return;
+    rows.forEach((li) => li.classList.toggle('hit', li === row));
+    row.scrollIntoView({ block: 'center' });
+  }
+
+  function filterTranscript() {
+    const q = $('#lecture-filter').value.trim().toLowerCase();
+    for (const li of $('#transcript').children) li.hidden = !!q && !li.textContent.toLowerCase().includes(q);
+  }
+
+  async function searchLectures(ev) {
+    ev.preventDefault();
+    const q = $('#lec-q').value.trim(), box = $('#lec-hits');
+    if (!q) { box.hidden = true; return; }
+    try {
+      const hits = (await api('GET', '/api/lectures/search?q=' + encodeURIComponent(q))).filter((h) => visible(h.course_id));
+      box.innerHTML = hits.length ? hits.map((h) =>
+        `<button type="button" class="hit-row" data-lecture="${h.lecture_id}" data-at="${h.start}">
+          <span class="t">${shortDate(h.date)}<br>${clock(h.start)}</span>
+          <span class="stack" style="gap:2px"><b>${esc(h.title)}</b><span>${esc(h.text)}</span></span>
+        </button>`).join('') : `<div class="empty-card">У транскриптах нічого не знайдено за «${esc(q)}».</div>`;
+      box.hidden = false;
+    } catch (e) {
+      toast(e.message, true);
+    }
   }
 
   function renderCourses() {
@@ -339,6 +471,8 @@
     event: { tab: 'Заняття', add: 'Нове заняття', edit: 'Змінити заняття', save: 'Додати заняття', path: '/api/events' },
     post: { tab: 'Новина', add: 'Нова новина', edit: 'Змінити новину', save: 'Опублікувати', path: '/api/posts' },
     course: { tab: 'Предмет', add: 'Новий предмет', edit: 'Змінити предмет', save: 'Додати предмет', path: '/api/courses' },
+    // added by the lecture tool with a transcript, so only edited here
+    lecture: { edit: 'Змінити запис лекції', path: '/api/lectures' },
   };
   const form = { type: 'assignment', item: null, preset: {} };
 
@@ -384,6 +518,12 @@
           input('teacher', 'Викладач', v.teacher, 'maxlength="200"') +
           input('link', 'Посилання на пари', v.link, 'type="url" placeholder="https://meet.google.com/…"') +
           input('color', 'Колір', v.color || '#0E5D69', 'type="color"');
+      case 'lecture':
+        return courseSelect(v.course_id) +
+          input('title', 'Тема', v.title, 'required maxlength="200"') +
+          input('date', 'Дата', v.date, 'type="date" required') +
+          input('video_url', 'Посилання на відео', v.video_url, 'type="url" placeholder="https://youtu.be/…"', 'YouTube, Google Drive, Zoom, Telegram…') +
+          textarea('summary', 'Конспект', v.summary, 10);
     }
     return '';
   }
@@ -402,7 +542,7 @@
     $('#form-title').textContent = item ? t.edit : 'Додати';
     $('#form-submit').textContent = item ? 'Зберегти' : t.save;
     $('#tabs').hidden = !!item;
-    $('#tabs').innerHTML = Object.entries(TYPES).map(([k, v]) =>
+    $('#tabs').innerHTML = Object.entries(TYPES).filter(([, v]) => v.tab).map(([k, v]) =>
       `<button type="button" class="tab" role="tab" data-tab="${k}" aria-selected="${k === type}">${v.tab}</button>`).join('');
     const v = Object.assign({ course_id: state.courses[0] ? state.courses[0].id : null }, preset, item || {});
     // with a key the author comes from it; the name field is only for open editing
@@ -426,6 +566,10 @@
         return { course_id: course(), title: val('title'), body: val('body'), pinned: el.pinned.checked };
       case 'course':
         return { name: val('name'), short: val('short'), teacher: val('teacher'), link: val('link'), color: val('color') };
+      case 'lecture':
+        // no transcript in the body: the server keeps the stored one
+        return { course_id: course(), event_id: form.item.event_id, title: val('title'), date: val('date'),
+          video_url: val('video_url'), summary: val('summary'), duration_s: form.item.duration_s };
     }
     return {};
   }
@@ -446,7 +590,7 @@
       else await api('POST', t.path, body);
       $('#form-dialog').close();
       toast(form.item ? 'Збережено' : 'Додано');
-      const jump = body.due_date || body.date;
+      const jump = form.type === 'lecture' ? '' : body.due_date || body.date;
       if (jump) state.sel = jump;
       if (jump) state.month = new Date(parse(jump).getFullYear(), parse(jump).getMonth(), 1);
       await reload();
@@ -465,7 +609,7 @@
 
   // ---- actions ----
   function findItem(type, id) {
-    const lists = { assignment: [...state.assignments, ...state.upcoming], event: state.events, post: state.posts, course: state.courses };
+    const lists = { assignment: [...state.assignments, ...state.upcoming], event: state.events, post: state.posts, course: state.courses, lecture: state.lectures };
     return (lists[type] || []).find((x) => x.id === id);
   }
 
@@ -484,7 +628,7 @@
 
   // ---- history ----
   const VERBS = { create: 'додав(ла)', update: 'змінив(ла)', delete: 'видалив(ла)', revert: 'повернув(ла)' };
-  const NOUNS = { course: 'предмет', event: 'заняття', event_series: 'серію занять', assignment: 'дедлайн', post: 'новину' };
+  const NOUNS = { course: 'предмет', event: 'заняття', event_series: 'серію занять', assignment: 'дедлайн', post: 'новину', lecture: 'запис лекції' };
   const FIELDS = {
     title: 'назва', name: 'назва', short: 'коротка назва', description: 'деталі', body: 'текст', due_date: 'дата', due_time: 'час',
     date: 'дата', start_time: 'початок', end_time: 'кінець', kind: 'тип', teacher: 'викладач', link: 'посилання',
@@ -559,6 +703,7 @@
     }
     if (!state.me) return err('Ключ недійсний або відкликаний. Отримай новий у боті: /key');
     $('#login-dialog').close();
+    try { await loadLectures(); } catch (e) { toast(e.message, true); }
     render();
     toast(state.me.can_write ? 'Привіт, ' + state.me.name + '!' : 'Ключ дає тільки перегляд — право редагувати дає адмін групи');
   }
@@ -579,7 +724,10 @@
     const el = ev.target.closest('button, [data-goto]');
     if (!el) return;
     const ds = el.dataset;
-    if (ds.day) goTo(ds.day);
+    if (ds.lecture) openLecture(Number(ds.lecture), ds.at != null ? Number(ds.at) : null);
+    else if (ds.seek) seek(Number(ds.seek));
+    else if ('lecAll' in ds) { state.lecAll = !state.lecAll; renderLectures(); }
+    else if (ds.day) goTo(ds.day);
     else if (ds.goto) goTo(ds.goto, true);
     else if (ds.chip) {
       const id = Number(ds.chip);
@@ -604,6 +752,8 @@
 
   $('#form').addEventListener('submit', submitForm);
   $('#login-form').addEventListener('submit', submitLogin);
+  $('#lec-search').addEventListener('submit', searchLectures);
+  $('#lecture-filter').addEventListener('input', filterTranscript);
   $('#btn-add').addEventListener('click', () => openForm('assignment', null, { due_date: state.sel, date: state.sel }));
   $('#btn-add-post').addEventListener('click', () => openForm('post'));
   $('#btn-add-course').addEventListener('click', () => openForm('course'));

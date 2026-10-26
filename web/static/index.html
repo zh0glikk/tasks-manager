@@ -64,6 +64,18 @@
     </aside>
   </div>
 
+  <section aria-labelledby="lec-h" class="stack">
+    <div class="sec-head between">
+      <h2 id="lec-h">Записи лекцій</h2>
+      <form class="lec-search" id="lec-search" role="search" hidden>
+        <input type="search" id="lec-q" placeholder="Пошук у транскриптах" aria-label="Пошук у транскриптах" maxlength="200">
+        <button type="submit" class="btn small">Знайти</button>
+      </form>
+    </div>
+    <div class="hits" id="lec-hits" hidden></div>
+    <div class="lectures" id="lectures"></div>
+  </section>
+
   <section aria-labelledby="courses-h" class="stack">
     <div class="sec-head between">
       <h2 id="courses-h">Предмети</h2>
@@ -98,6 +110,22 @@
     <button type="button" class="icon-btn" data-close aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
   <ol class="history" id="history"></ol>
+</dialog>
+
+<dialog id="lecture-dialog" aria-labelledby="lecture-title" class="wide">
+  <div class="dlg-head">
+    <div>
+      <h2 id="lecture-title"></h2>
+      <p class="muted" id="lecture-meta"></p>
+    </div>
+    <button type="button" class="icon-btn" data-close aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <div class="lec-summary" id="lecture-summary"></div>
+  <label class="field">Транскрипт
+    <input type="search" id="lecture-filter" placeholder="Знайти в тексті" autocomplete="off">
+    <span class="hint">Автоматичне розпізнавання мовлення: імена й терміни можуть бути з помилками.</span>
+  </label>
+  <ol class="transcript" id="transcript"></ol>
 </dialog>
 
 <dialog id="login-dialog" aria-labelledby="login-title">

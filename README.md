@@ -92,7 +92,8 @@ DATABASE_URL=postgres://tasks:tasks@localhost:5432/tasks?sslmode=disable go run 
 
 **MCP** живе на `/mcp` (streamable HTTP, stateless), доступ за заголовком `Authorization: Bearer e2_…`.
 - Інструменти: `chats`, `chat_messages`, `calendar`, `upcoming_deadlines`, `news`, `courses`, `recent_changes`,
-  `add_deadline`, `update_deadline`, `add_news`, `add_event`. Інструментів для видалення немає.
+  `lectures`, `lecture_transcript`, `search_lectures`, `add_deadline`, `update_deadline`, `add_news`, `add_event`,
+  `update_lecture`. Інструментів для видалення немає.
 - У базі зберігається тільки SHA-256 ключа. Кожен виклик пишеться в `mcp_access`, а зміни потрапляють у журнал
   змін з автором «Ім'я (через Claude)».
 - Ліміти: 120 викликів на хвилину на ключ і 300 на IP.
@@ -127,10 +128,43 @@ DATABASE_URL=postgres://tasks:tasks@localhost:5432/tasks?sslmode=disable go run 
 Тести (потрібен Postgres): `TEST_DATABASE_URL=postgres://… go test ./...`. Вони проганяють бота з фейковим
 Telegram API і справжнього MCP-клієнта.
 
+## Записи лекцій і транскрипти
+
+Відео лишається там, куди його виклали (YouTube, Google Drive, Zoom, Telegram). На сервері зберігаються тільки
+посилання, транскрипт із таймкодами (`lecture_segments`) і конспект. Читати записи можна **лише з ключем**
+(достатньо ключа на перегляд). Додавати й змінювати їх можна з правом запису.
+- На сайті є розділ «Записи лекцій» з пошуком по всіх транскриптах. Якщо у запису є посилання на YouTube, клік
+  по таймкоду відкриває відео з цього місця. У панелі дня біля пари, до якої є запис, з'являється «Запис і транскрипт»:
+  запис прив'язується до пари через `event_id` або збігом дати й предмета.
+- У журнал змін потрапляють тільки поля запису, без транскрипту, а публічний `/api/changes` не показує навіть їх.
+- Конспект зручно робити через Claude: «зроби конспект лекції #3 з таймкодами і збережи» (інструмент `update_lecture`).
+
+**Розпізнавання працює локально** (на M-серії Mac година запису обробляється за кілька хвилин). Потрібні
+`brew install ffmpeg whisper-cpp yt-dlp` і модель
+[ggml-large-v3-turbo.bin](https://huggingface.co/ggerganov/whisper.cpp/tree/main) у `~/.cache/whisper-models/`.
+
+```sh
+export E2_URL=https://адреса-сайту E2_KEY=e2_…   # ключ із правом запису
+
+# за посиланням: yt-dlp сам бере назву й дату (дату можна змінити через -date)
+go run ./cmd/lecture -url 'https://www.youtube.com/watch?v=…' -course 3
+
+# локальний файл (наприклад, збережений з Telegram Desktop)
+go run ./cmd/lecture -file пара.mp4 -date 2026-10-23 -title 'Методологія: лекція 4' -course 1 -event 42 \
+  -video-url 'https://t.me/c/…/123'
+```
+
+Інші прапорці: `-transcript FILE.json` бере готовий JSON від whisper.cpp, `-out FILE` зберігає запит замість
+завантаження. Whisper часом пише «диссертація» чи «доброчисність»; такі помилки утиліта виправляє сама.
+Підказка `-prompt` з правильним написанням допомагає менше і може змусити whisper повторювати вигадані фрази,
+тому за замовчуванням її немає. id предметів видно в MCP-інструменті
+`courses`, id пар в інструменті `calendar`.
+
 ## Структура
 
 ```
 cmd/server/            точка входу: конфіг, міграції, HTTP-сервер
+cmd/lecture/           локальне розпізнавання запису і завантаження транскрипту
 internal/db/           підключення і вбудовані SQL-міграції
 internal/store/        запити до БД, журнал змін, відкат
 internal/api/          JSON API, вхід за ключем
@@ -152,6 +186,10 @@ web/static/            UI (index.html, style.css, app.js)
 | GET | `/api/assignments?from=…&to=…` | дедлайни за період |
 | GET | `/api/posts?limit=30` | новини (закріплені першими) |
 | POST / PUT / DELETE | `/api/{courses,events,assignments,posts}[/{id}]` | створити / змінити / видалити |
+| GET | `/api/lectures[?course_id=]` | записи лекцій (потрібен ключ, достатньо на перегляд) |
+| GET | `/api/lectures/{id}` | запис і його транскрипт (ключ) |
+| GET | `/api/lectures/search?q=…` | пошук у транскриптах (ключ) |
+| POST / PUT / DELETE | `/api/lectures[/{id}]` | додати запис із полем `transcript` / змінити / видалити |
 | GET | `/api/changes?limit=50` | журнал змін |
 | POST | `/api/changes/{id}/revert` | повернути зміну |
 

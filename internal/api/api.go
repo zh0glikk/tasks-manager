@@ -20,12 +20,15 @@ const (
 	maxSeries      = 60
 	writesPerIP    = 30
 	writesInterval = time.Minute
+	maxBody        = 64 << 10
+	maxLectureBody = 8 << 20 // a transcript of a long class
 )
 
 type API struct {
 	store *store.Store
 	auth  keyauth.Verifier
 	lim   *ratelimit.Limiter
+	open  bool
 }
 
 type Options struct {
@@ -36,11 +39,11 @@ type Options struct {
 	BotUsername func() string
 }
 
-// New builds the HTTP handler. Reads are public; writes need a bot-issued key
-// with write access unless opts.Open is set.
+// New builds the HTTP handler. Reads are public except lectures, which need any
+// bot-issued key; writes need a key with write access unless opts.Open is set.
 func New(s *store.Store, static fs.FS, opts Options) http.Handler {
 	lim := ratelimit.New(writesPerIP, writesInterval)
-	a := &API{store: s, auth: opts.Auth, lim: lim}
+	a := &API{store: s, auth: opts.Auth, lim: lim, open: opts.Open}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
@@ -72,6 +75,13 @@ func New(s *store.Store, static fs.FS, opts Options) http.Handler {
 	mux.HandleFunc("POST /api/posts", a.createPost)
 	mux.HandleFunc("PUT /api/posts/{id}", a.updatePost)
 	mux.HandleFunc("DELETE /api/posts/{id}", a.delete(store.EntityPost))
+
+	mux.HandleFunc("GET /api/lectures", a.listLectures)
+	mux.HandleFunc("GET /api/lectures/search", a.searchLectures)
+	mux.HandleFunc("GET /api/lectures/{id}", a.getLecture)
+	mux.HandleFunc("POST /api/lectures", a.createLecture)
+	mux.HandleFunc("PUT /api/lectures/{id}", a.updateLecture)
+	mux.HandleFunc("DELETE /api/lectures/{id}", a.delete(store.EntityLecture))
 
 	mux.HandleFunc("GET /api/changes", a.listChanges)
 	mux.HandleFunc("POST /api/changes/{id}/revert", a.revert)
@@ -225,8 +235,82 @@ func (a *API) delete(entity string) http.HandlerFunc {
 	}
 }
 
+// ---- lectures (members only) ----
+
+// member lets the request through with any valid key, read-only included.
+func (a *API) member(w http.ResponseWriter, r *http.Request) bool {
+	if a.open {
+		return true
+	}
+	if _, status, msg := authenticate(r, a.auth); status != 0 {
+		writeJSON(w, status, map[string]any{"error": msg, "login_required": status == http.StatusUnauthorized})
+		return false
+	}
+	return true
+}
+
+func (a *API) listLectures(w http.ResponseWriter, r *http.Request) {
+	if !a.member(w, r) {
+		return
+	}
+	v, err := a.store.ListLectures(r.Context(), int64Param(r, "course_id"))
+	respond(w, v, err)
+}
+
+func (a *API) searchLectures(w http.ResponseWriter, r *http.Request) {
+	if !a.member(w, r) {
+		return
+	}
+	v, err := a.store.SearchSegments(r.Context(), r.URL.Query().Get("q"), int64Param(r, "course_id"), intParam(r, "limit", 50, 200))
+	respond(w, v, err)
+}
+
+func (a *API) getLecture(w http.ResponseWriter, r *http.Request) {
+	var id int64
+	if !a.member(w, r) || !pathID(w, r, &id) {
+		return
+	}
+	l, err := a.store.GetLecture(r.Context(), id)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	segs, err := a.store.Segments(r.Context(), id, 0, 0)
+	respond(w, map[string]any{"lecture": l, "transcript": segs}, err)
+}
+
+type lectureReq struct {
+	store.Lecture
+	Author string `json:"author"`
+	// Transcript replaces the stored one; omitted on update keeps it.
+	Transcript []store.Segment `json:"transcript"`
+}
+
+func (a *API) createLecture(w http.ResponseWriter, r *http.Request) {
+	var req lectureReq
+	if !decodeLimit(w, r, &req, maxLectureBody) || !validLecture(w, &req) {
+		return
+	}
+	id, err := a.store.CreateLecture(r.Context(), a.author(r, req.Author), req.Lecture, req.Transcript)
+	respond(w, map[string]int64{"id": id}, err)
+}
+
+func (a *API) updateLecture(w http.ResponseWriter, r *http.Request) {
+	var req lectureReq
+	if !decodeLimit(w, r, &req, maxLectureBody) || !pathID(w, r, &req.ID) || !validLecture(w, &req) {
+		return
+	}
+	respond(w, nil, a.store.UpdateLecture(r.Context(), a.author(r, req.Author), req.Lecture, req.Transcript))
+}
+
 func (a *API) listChanges(w http.ResponseWriter, r *http.Request) {
 	v, err := a.store.ListChanges(r.Context(), intParam(r, "limit", 50, 200))
+	// the change log is public, lecture contents are not
+	for i := range v {
+		if v[i].Entity == store.EntityLecture {
+			v[i].Before, v[i].After = nil, nil
+		}
+	}
 	respond(w, v, err)
 }
 
@@ -247,6 +331,9 @@ func validAssignment(w http.ResponseWriter, a *store.Assignment) bool {
 	return valid(w, validate.Assignment(a))
 }
 func validPost(w http.ResponseWriter, p *store.Post) bool { return valid(w, validate.Post(p)) }
+func validLecture(w http.ResponseWriter, l *lectureReq) bool {
+	return valid(w, validate.Lecture(&l.Lecture)) && valid(w, validate.Segments(l.Transcript))
+}
 
 func valid(w http.ResponseWriter, err error) bool {
 	if err != nil {
@@ -318,7 +405,11 @@ func dateRange(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 // ---- plumbing ----
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	return decodeLimit(w, r, v, maxBody)
+}
+
+func decodeLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		fail(w, http.StatusBadRequest, "неправильний JSON")
 		return false
@@ -344,8 +435,18 @@ func intParam(r *http.Request, name string, def, max int) int {
 	return min(v, max)
 }
 
+func int64Param(r *http.Request, name string) *int64 {
+	v, err := strconv.ParseInt(r.URL.Query().Get(name), 10, 64)
+	if err != nil || v <= 0 {
+		return nil
+	}
+	return &v
+}
+
 func respond(w http.ResponseWriter, v any, err error) {
 	switch {
+	case errors.Is(err, store.ErrBadRef):
+		fail(w, http.StatusBadRequest, "такого предмета або заняття немає")
 	case errors.Is(err, store.ErrNotFound):
 		fail(w, http.StatusNotFound, "не знайдено — можливо, вже видалено")
 	case errors.Is(err, store.ErrAlreadyReverted):

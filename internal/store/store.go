@@ -84,6 +84,7 @@ const (
 	EntitySeries     = "event_series"
 	EntityAssignment = "assignment"
 	EntityPost       = "post"
+	EntityLecture    = "lecture"
 
 	ActionCreate = "create"
 	ActionUpdate = "update"
@@ -96,6 +97,7 @@ var tables = map[string]string{
 	EntityEvent:      "events",
 	EntityAssignment: "assignments",
 	EntityPost:       "posts",
+	EntityLecture:    "lectures",
 }
 
 type Store struct {
@@ -457,6 +459,12 @@ func restore(ctx context.Context, tx pgx.Tx, entity string, before []byte) error
 			return err
 		}
 		return updatePost(ctx, tx, v)
+	case EntityLecture:
+		var v Lecture
+		if err := json.Unmarshal(before, &v); err != nil {
+			return err
+		}
+		return updateLecture(ctx, tx, v)
 	}
 	return ErrNotRevertible
 }
