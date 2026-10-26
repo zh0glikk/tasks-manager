@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -101,7 +102,27 @@ var tables = map[string]string{
 }
 
 type Store struct {
-	db *pgxpool.Pool
+	db       *pgxpool.Pool
+	onChange atomic.Pointer[func(entity string)]
+}
+
+// OnChange sets a callback run after every committed change, with the entity
+// that changed (e.g. EntityEvent). The bot uses it to drop its schedule cache.
+func (s *Store) OnChange(f func(entity string)) { s.onChange.Store(&f) }
+
+func (s *Store) changed(entity string) {
+	if f := s.onChange.Load(); f != nil {
+		(*f)(entity)
+	}
+}
+
+// commit commits tx and reports the change to the OnChange callback.
+func (s *Store) commit(ctx context.Context, tx pgx.Tx, entity string) error {
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.changed(entity)
+	return nil
 }
 
 func New(db *pgxpool.Pool) *Store {
@@ -227,7 +248,7 @@ func (s *Store) CreateEvents(ctx context.Context, author string, e Event, dates 
 	if err := logChange(ctx, tx, EntitySeries, *e.SeriesID, ActionCreate, author, nil, after); err != nil {
 		return nil, err
 	}
-	return ids, tx.Commit(ctx)
+	return ids, s.commit(ctx, tx, EntitySeries)
 }
 
 func (s *Store) UpdateEvent(ctx context.Context, author string, e Event) error {
@@ -430,7 +451,7 @@ func (s *Store) Revert(ctx context.Context, author string, changeID int64) error
 	if _, err := tx.Exec(ctx, `update changes set reverted_at = now() where id = $1`, changeID); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return s.commit(ctx, tx, c.Entity)
 }
 
 func restore(ctx context.Context, tx pgx.Tx, entity string, before []byte) error {
@@ -500,7 +521,7 @@ func (s *Store) write(ctx context.Context, author, entity, action string, id int
 	if err := logChange(ctx, tx, entity, id, action, author, before, after); err != nil {
 		return 0, err
 	}
-	return id, tx.Commit(ctx)
+	return id, s.commit(ctx, tx, entity)
 }
 
 func snapshot(ctx context.Context, tx pgx.Tx, table string, id int64, withDeleted bool) ([]byte, error) {

@@ -42,6 +42,8 @@ type Bot struct {
 	mu       sync.Mutex
 	members  map[memberKey]memberEntry
 	username string // learned via getMe
+
+	classes classCache
 }
 
 type memberKey struct{ chat, user int64 }
@@ -59,13 +61,16 @@ func New(cfg Config, s *store.Store) *Bot {
 	for _, id := range cfg.Admins {
 		admins[id] = true
 	}
-	return &Bot{
+	b := &Bot{
 		cfg:     cfg,
 		tg:      NewClient(cfg.Token, cfg.APIURL),
 		store:   s,
 		admins:  admins,
 		members: map[memberKey]memberEntry{},
+		classes: classCache{stale: true, sent: map[string]bool{}},
 	}
+	s.OnChange(b.classes.invalidate)
+	return b
 }
 
 // Run polls Telegram for updates until ctx is done.
@@ -86,6 +91,7 @@ func (b *Bot) Run(ctx context.Context) {
 		log.Printf("telegram: deleteWebhook: %v", err)
 	}
 	go b.housekeeping(ctx)
+	go b.classReminders(ctx)
 
 	offset := b.loadOffset(ctx)
 	backoff := time.Second

@@ -841,3 +841,52 @@ func TestImportExport(t *testing.T) {
 		t.Fatalf("chat_messages: %q", out)
 	}
 }
+
+func TestClassReminders(t *testing.T) {
+	st, bot, fake, _ := setup(t)
+	ctx := context.Background()
+	loc, _ := time.LoadLocation("Europe/Kyiv")
+	at := func(hm string) time.Time {
+		t, _ := time.ParseInLocation("2006-01-02 15:04", "2027-03-03 "+hm, loc)
+		return t
+	}
+	course := int64(1)
+	ids, err := st.CreateEvents(ctx, "Адмін", store.Event{CourseID: &course, Kind: "лекція", Date: "2027-03-03", StartTime: "15:20", EndTime: "16:40"}, []string{"2027-03-03"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bot.CheckClasses(ctx, at("15:09"))
+	sent := fake.count(adminID)
+	bot.CheckClasses(ctx, at("15:10"))
+	if got := fake.last(t, adminID); fake.count(adminID) != sent+1 || !strings.Contains(got, "Через 10 хв") || !strings.Contains(got, "Філософські засади") || !strings.Contains(got, "15:20–16:40") {
+		t.Fatalf("10-minute reminder: %q", got)
+	}
+	bot.CheckClasses(ctx, at("15:11"))
+	if fake.count(adminID) != sent+1 {
+		t.Fatal("reminder sent twice")
+	}
+	bot.CheckClasses(ctx, at("15:20"))
+	if got := fake.last(t, adminID); !strings.Contains(got, "Почалась пара") {
+		t.Fatalf("start reminder: %q", got)
+	}
+
+	// a schedule change reloads the cache: the moved class reminds again
+	e, _ := st.ListEvents(ctx, "2027-03-03", "2027-03-03")
+	e[0].StartTime, e[0].EndTime = "17:00", ""
+	if err := st.UpdateEvent(ctx, "Адмін", e[0]); err != nil {
+		t.Fatal(err)
+	}
+	sent = fake.count(adminID)
+	bot.CheckClasses(ctx, at("16:50"))
+	if got := fake.last(t, adminID); fake.count(adminID) != sent+1 || !strings.Contains(got, "17:00") {
+		t.Fatalf("moved class: %q", got)
+	}
+	if err := st.Delete(ctx, "Адмін", store.EntityEvent, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	bot.CheckClasses(ctx, at("17:00"))
+	if fake.count(adminID) != sent+1 {
+		t.Fatalf("deleted class reminded: %q", fake.last(t, adminID))
+	}
+}
