@@ -299,7 +299,7 @@ func TestBotAndMCP(t *testing.T) {
 	}
 
 	// read-only key can read but not write
-	roKey, _, err := st.CreateKey(ctx, "Гість", nil, store.ScopeRead, store.KeyTTL)
+	roKey, _, err := st.CreateKey(ctx, "Гість", nil, store.ScopeRead, store.NoExpiry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestBotAndMCP(t *testing.T) {
 
 	// /key again shows the same key, now with the write grant
 	bot.Handle(ctx, dm(irynaID, "Ірина", "/key"))
-	if got := fake.last(t, irynaID); keyRe.FindString(got) != key || !strings.Contains(got, "читання і запис") || !strings.Contains(got, "діє до") {
+	if got := fake.last(t, irynaID); keyRe.FindString(got) != key || !strings.Contains(got, "читання і запис") || !strings.Contains(got, "без строку дії") {
 		t.Fatalf("second /key: %q", got)
 	}
 	if n, _ := st.CountUserKeys(ctx, irynaID); n != 1 {
@@ -405,7 +405,7 @@ func TestKeyLimitsAndExpiry(t *testing.T) {
 	uid := irynaID
 	var keys []string
 	for range store.MaxKeysPerUser + 1 {
-		k, _, err := st.CreateKey(ctx, "Ірина", &uid, store.ScopeRead, store.KeyTTL)
+		k, _, err := st.CreateKey(ctx, "Ірина", &uid, store.ScopeRead, store.NoExpiry)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -830,7 +830,7 @@ func TestImportExport(t *testing.T) {
 	}
 
 	// visible through MCP to an admin console key
-	key, _, _ := st.CreateKey(ctx, "Адмін", nil, store.ScopeRead, store.KeyTTL)
+	key, _, _ := st.CreateKey(ctx, "Адмін", nil, store.ScopeRead, store.NoExpiry)
 	s, err := connect(t, url, key)
 	if err != nil {
 		t.Fatal(err)

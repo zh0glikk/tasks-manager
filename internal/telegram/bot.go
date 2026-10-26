@@ -354,7 +354,7 @@ const privateHelp = `Я бот календаря групи.
 <b>У чаті групи:</b> /today, /week — що на сьогодні й на тиждень; увечері нагадую про завтрашні дедлайни.
 
 <b>Тут, в особистих:</b>
-/key — персональний ключ для Claude (MCP) і сайту, діє пів року: читати переписку чатів групи і календар. Додавати записи можуть лише ті, кому адмін дав право. Ключ один на всі пристрої: /key щоразу показує його ж.
+/key — персональний ключ для Claude (MCP) і сайту: читати переписку чатів групи і календар. Додавати записи можуть лише ті, кому адмін дав право. Ключ один на всі пристрої: /key щоразу показує його ж.
 /revoke — відкликати всі свої ключі
 
 Ключ видається учасникам основних чатів групи і перестає працювати, якщо вийти з них. Я зберігаю повідомлення обмежений час, щоб Claude міг робити саммарі; через Claude кожен бачить тільки ті чати, де він сам є.`
@@ -462,9 +462,9 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 		}
 	}
 	// one key per person: show the stored one again, create only if there is none
-	key, k, err := b.store.UserKey(ctx, uid, store.KeyTTL)
+	key, k, err := b.store.UserKey(ctx, uid)
 	if errors.Is(err, store.ErrNotFound) {
-		key, k, err = b.store.CreateKey(ctx, m.From.DisplayName(), &uid, scope, store.KeyTTL)
+		key, k, err = b.store.CreateKey(ctx, m.From.DisplayName(), &uid, scope, store.NoExpiry)
 	}
 	if err != nil {
 		log.Printf("telegram: create key: %v", err)
@@ -484,15 +484,15 @@ func (b *Bot) issueKey(ctx context.Context, m *Message, args string) {
 		site = fmt.Sprintf("\n\nРедагувати сайт: <a href=\"%s/#key=%s\">увійти одним кліком</a> (або кнопка «Увійти» на сайті і цей ключ).",
 			html.EscapeString(strings.TrimRight(b.cfg.PublicURL, "/")), key)
 	}
-	b.reply(ctx, uid, fmt.Sprintf(`Твій ключ (%s), діє до %s:
+	b.reply(ctx, uid, fmt.Sprintf(`Твій ключ (%s):
 
 <code>%s</code>
 
-Підключити в Claude Code (один раз — ключ житиме пів року):
+Підключити в Claude Code (один раз):
 <code>claude mcp add --scope user --transport http e2 %s --header "Authorization: Bearer %s"</code>%s
 
-Це твій ключ для всіх пристроїв: /key щоразу покаже його ж і продовжить ще на пів року. Якщо ключ потрапив до чужих — /revoke, потім /key видасть новий. Нікому не пересилай ключ і посилання та видали це повідомлення після використання.`,
-		access, k.ExpiresAt.In(b.cfg.Location).Format("02.01.2006"), key, html.EscapeString(url), key, site))
+Це твій ключ для всіх пристроїв, без строку дії: /key щоразу покаже його ж. Він працює, доки ти в чатах групи. Якщо ключ потрапив до чужих — /revoke, потім /key видасть новий. Нікому не пересилай ключ і посилання та видали це повідомлення після використання.`,
+		access, key, html.EscapeString(url), key, site))
 }
 
 func (b *Bot) listKeys(ctx context.Context) string {

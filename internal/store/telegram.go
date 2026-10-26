@@ -197,8 +197,8 @@ const (
 	ScopeWrite = "write"
 	keyPrefix  = "e2_"
 
-	KeyTTL         = 180 * 24 * time.Hour
-	MaxKeysPerUser = 5 // older ones are revoked when a new key is issued
+	NoExpiry       = time.Duration(0) // the default: keys work until revoked
+	MaxKeysPerUser = 5                // older ones are revoked when a new key is issued
 )
 
 type APIKey struct {
@@ -237,7 +237,8 @@ func newKey() string {
 	return keyPrefix + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 }
 
-// CreateKey issues a new key valid for ttl and returns it in plain text.
+// CreateKey issues a new key valid for ttl (NoExpiry: until revoked) and
+// returns it in plain text.
 // Keys of Telegram users are also stored as is, so UserKey can return them
 // again; console keys are shown once and kept only as a hash. A Telegram user
 // may hold up to MaxKeysPerUser active keys; the oldest beyond that are revoked.
@@ -254,7 +255,7 @@ func (s *Store) CreateKey(ctx context.Context, name string, tgUserID *int64, sco
 		stored = &plain
 	}
 	k, err := scanKey(tx.QueryRow(ctx, `insert into api_keys (tg_user_id, name, key_hash, key_plain, scope, expires_at)
-		values ($1, $2, $3, $4, $5, now() + $6 * interval '1 second') returning `+keyCols,
+		values ($1, $2, $3, $4, $5, case when $6::bigint = 0 then null else now() + $6 * interval '1 second' end) returning `+keyCols,
 		tgUserID, name, hashKey(plain), stored, scope, int64(ttl.Seconds())))
 	if err != nil {
 		return "", APIKey{}, err
@@ -269,16 +270,14 @@ func (s *Store) CreateKey(ctx context.Context, name string, tgUserID *int64, sco
 	return plain, k, tx.Commit(ctx)
 }
 
-// UserKey returns the user's newest active stored key with its expiry pushed
-// to ttl from now, or ErrNotFound when there is none (e.g. only keys issued
-// before keys were stored).
-func (s *Store) UserKey(ctx context.Context, tgUserID int64, ttl time.Duration) (string, APIKey, error) {
+// UserKey returns the user's newest active stored key, or ErrNotFound when
+// there is none (e.g. only keys issued before keys were stored).
+func (s *Store) UserKey(ctx context.Context, tgUserID int64) (string, APIKey, error) {
 	var plain string
 	var k APIKey
-	err := s.db.QueryRow(ctx, `update api_keys set expires_at = now() + $2 * interval '1 second'
-		where id = (select id from api_keys where tg_user_id = $1 and key_plain is not null and `+activeKey+`
-			order by created_at desc, id desc limit 1)
-		returning key_plain, `+keyCols, tgUserID, int64(ttl.Seconds())).
+	err := s.db.QueryRow(ctx, `select key_plain, `+keyCols+` from api_keys
+		where tg_user_id = $1 and key_plain is not null and `+activeKey+`
+		order by created_at desc, id desc limit 1`, tgUserID).
 		Scan(&plain, &k.ID, &k.TGUserID, &k.Name, &k.Scope, &k.CreatedAt, &k.ExpiresAt, &k.LastUsedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", k, ErrNotFound

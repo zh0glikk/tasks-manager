@@ -36,12 +36,12 @@ func keysCommand(ctx context.Context, st *store.Store, args []string) int {
 			fmt.Fprintln(os.Stderr, keysUsage)
 			return 2
 		}
-		key, k, err := st.CreateKey(ctx, name, nil, scope, store.KeyTTL)
+		key, k, err := st.CreateKey(ctx, name, nil, scope, store.NoExpiry)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1
 		}
-		fmt.Printf("key #%d for %s (%s, valid until %s):\n%s\n", k.ID, k.Name, k.Scope, k.ExpiresAt.Format("2006-01-02"), key)
+		fmt.Printf("key #%d for %s (%s):\n%s\n", k.ID, k.Name, k.Scope, key)
 	case "list":
 		keys, err := st.ListKeys(ctx)
 		if err != nil {
