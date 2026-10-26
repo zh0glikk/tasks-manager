@@ -61,13 +61,14 @@ func main() {
 	var bot *telegram.Bot
 	if token := os.Getenv("TELEGRAM_BOT_TOKEN"); token != "" {
 		bot = telegram.New(telegram.Config{
-			Token:     token,
-			APIURL:    os.Getenv("TELEGRAM_API_URL"),
-			ChatID:    envInt("TELEGRAM_CHAT_ID"),
-			Admins:    envInts("TELEGRAM_ADMIN_IDS"),
-			PublicURL: os.Getenv("PUBLIC_URL"),
-			Retention: time.Duration(envIntDefault("CHAT_RETENTION_DAYS", 14)) * 24 * time.Hour,
-			Location:  loc,
+			Token:       token,
+			APIURL:      os.Getenv("TELEGRAM_API_URL"),
+			ChatID:      envInt("TELEGRAM_CHAT_ID"),
+			Admins:      envInts("TELEGRAM_ADMIN_IDS"),
+			ClassChatID: envInt("CLASS_REMINDERS_CHAT_ID"),
+			PublicURL:   os.Getenv("PUBLIC_URL"),
+			Retention:   time.Duration(envIntDefault("CHAT_RETENTION_DAYS", 14)) * 24 * time.Hour,
+			Location:    loc,
 		}, st)
 	} else {
 		log.Print("TELEGRAM_BOT_TOKEN not set, Telegram bot disabled")

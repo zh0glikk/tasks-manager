@@ -889,4 +889,19 @@ func TestClassReminders(t *testing.T) {
 	if fake.count(adminID) != sent+1 {
 		t.Fatalf("deleted class reminded: %q", fake.last(t, adminID))
 	}
+
+	// with a reminders chat set, they go there and not to the admins
+	if _, err := st.CreateEvents(ctx, "Адмін", store.Event{CourseID: &course, Kind: "семінар", Date: "2027-03-03", StartTime: "18:00"}, []string{"2027-03-03"}); err != nil {
+		t.Fatal(err)
+	}
+	group := telegram.New(telegram.Config{Token: "test", APIURL: strings.TrimSuffix(fakeURL(t, fake), "/"), Admins: []int64{adminID},
+		ClassChatID: groupID, Location: loc}, st)
+	inGroup := fake.count(groupID)
+	group.CheckClasses(ctx, at("17:50"))
+	if got := fake.last(t, groupID); fake.count(groupID) != inGroup+1 || !strings.Contains(got, "семінар, 18:00") {
+		t.Fatalf("group reminder: %q", got)
+	}
+	if fake.count(adminID) != sent+1 {
+		t.Fatal("admins got the reminder meant for the group")
+	}
 }

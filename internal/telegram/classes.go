@@ -39,9 +39,9 @@ func (c *classCache) invalidate(entity string) {
 	}
 }
 
-// classReminders goes to the admins for now.
+// classReminders go to cfg.ClassChatID, or to the admins when it isn't set.
 func (b *Bot) classReminders(ctx context.Context) {
-	if len(b.admins) == 0 {
+	if b.cfg.ClassChatID == 0 && len(b.admins) == 0 {
 		return
 	}
 	tick := time.NewTicker(classCheck)
@@ -89,7 +89,11 @@ func (b *Bot) CheckClasses(ctx context.Context, now time.Time) {
 	c.mu.Unlock()
 
 	for _, text := range due {
-		b.notifyAdmins(ctx, text)
+		if b.cfg.ClassChatID != 0 {
+			b.reply(ctx, b.cfg.ClassChatID, text)
+		} else {
+			b.notifyAdmins(ctx, text)
+		}
 	}
 }
 

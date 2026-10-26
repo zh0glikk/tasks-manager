@@ -24,13 +24,15 @@ const (
 )
 
 type Config struct {
-	Token     string
-	APIURL    string // override for tests
-	ChatID    int64  // optional chat that is allowed from the start; others are approved by an admin
-	Admins    []int64
-	PublicURL string
-	Retention time.Duration
-	Location  *time.Location
+	Token  string
+	APIURL string // override for tests
+	ChatID int64  // optional chat that is allowed from the start; others are approved by an admin
+	Admins []int64
+	// ClassChatID gets the class reminders; when 0 they go to the admins
+	ClassChatID int64
+	PublicURL   string
+	Retention   time.Duration
+	Location    *time.Location
 }
 
 type Bot struct {
