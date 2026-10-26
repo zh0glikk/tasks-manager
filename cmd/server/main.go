@@ -24,6 +24,10 @@ import (
 	"github.com/zh0glikk/tasks-manager/web"
 )
 
+// classRemindersChat is «Аспірантура Каразіна Екологія 2026»: it gets "class
+// in 10 minutes" and "class started". CLASS_REMINDERS_CHAT_ID overrides it.
+const classRemindersChat = -5304357949
+
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -65,7 +69,7 @@ func main() {
 			APIURL:      os.Getenv("TELEGRAM_API_URL"),
 			ChatID:      envInt("TELEGRAM_CHAT_ID"),
 			Admins:      envInts("TELEGRAM_ADMIN_IDS"),
-			ClassChatID: envInt("CLASS_REMINDERS_CHAT_ID"),
+			ClassChatID: envInt64Default("CLASS_REMINDERS_CHAT_ID", classRemindersChat),
 			PublicURL:   os.Getenv("PUBLIC_URL"),
 			Retention:   time.Duration(envIntDefault("CHAT_RETENTION_DAYS", 14)) * 24 * time.Hour,
 			Location:    loc,
@@ -160,6 +164,13 @@ func waitReady(ready *atomic.Bool, next http.Handler) http.Handler {
 func envInt(name string) int64 {
 	n, _ := strconv.ParseInt(strings.TrimSpace(os.Getenv(name)), 10, 64)
 	return n
+}
+
+func envInt64Default(name string, def int64) int64 {
+	if n := envInt(name); n != 0 {
+		return n
+	}
+	return def
 }
 
 func envIntDefault(name string, def int) int {

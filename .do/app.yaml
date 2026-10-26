@@ -32,10 +32,6 @@ services:
       - key: TELEGRAM_CHAT_ID
         scope: RUN_TIME
         value: "-100XXXXXXXXXX"
-      # optional: the chat that gets "class in 10 minutes / class started"; unset sends them to the admins
-      - key: CLASS_REMINDERS_CHAT_ID
-        scope: RUN_TIME
-        value: "-5304357949"
       - key: TELEGRAM_ADMIN_IDS
         scope: RUN_TIME
         value: "YOUR_TELEGRAM_USER_ID"
