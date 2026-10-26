@@ -86,8 +86,6 @@
     me: null, // {name, can_write} when logged in with a bot key
   };
   const canEdit = () => !state.authRequired || !!(state.me && state.me.can_write);
-  // lectures are for group members: any key, read-only included
-  const isMember = () => !state.authRequired || !!state.me;
 
   const courseOf = (id) => state.courses.find((c) => c.id === id) || GENERAL;
   const cvars = (c) => { const col = safeColor(c.color); return `--c:${col};--cs:${col}1f`; };
@@ -118,7 +116,6 @@
   function logout() {
     store.set('key', '');
     state.me = null;
-    state.lectures = [];
     render();
     toast('Ти вийшов');
   }
@@ -165,7 +162,7 @@
   }
   async function loadPosts() { state.posts = await api('GET', '/api/posts?limit=30'); }
   async function loadCourses() { state.courses = await api('GET', '/api/courses'); }
-  async function loadLectures() { state.lectures = isMember() ? await api('GET', '/api/lectures') : []; }
+  async function loadLectures() { state.lectures = await api('GET', '/api/lectures'); }
   async function loadConfig() {
     const cfg = await api('GET', '/api/config');
     state.authRequired = cfg.auth_required;
@@ -174,8 +171,7 @@
 
   async function reload() {
     try {
-      await Promise.all([loadConfig(), loadMe(), loadCourses(), loadMonth(), loadUpcoming(), loadPosts()]);
-      await loadLectures();
+      await Promise.all([loadConfig(), loadMe(), loadCourses(), loadMonth(), loadUpcoming(), loadPosts(), loadLectures()]);
     } catch (e) {
       toast('Не вдалося завантажити: ' + e.message, true);
     }
@@ -340,12 +336,6 @@
   }
 
   function renderLectures() {
-    $('#lec-search').hidden = !isMember();
-    if (!isMember()) {
-      $('#lec-hits').hidden = true;
-      $('#lectures').innerHTML = '<div class="empty-card">Записи пар і транскрипти бачать лише учасники групи. <button type="button" class="link-btn" data-login>Увійти з ключем із бота</button></div>';
-      return;
-    }
     const list = state.lectures.filter((l) => visible(l.course_id));
     if (!list.length) {
       $('#lectures').innerHTML = '<div class="empty-card">Записів ще немає. Їх додають утилітою <code>lecture</code> (див. README).</div>';
@@ -703,7 +693,6 @@
     }
     if (!state.me) return err('Ключ недійсний або відкликаний. Отримай новий у боті: /key');
     $('#login-dialog').close();
-    try { await loadLectures(); } catch (e) { toast(e.message, true); }
     render();
     toast(state.me.can_write ? 'Привіт, ' + state.me.name + '!' : 'Ключ дає тільки перегляд — право редагувати дає адмін групи');
   }

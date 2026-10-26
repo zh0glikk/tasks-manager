@@ -55,9 +55,12 @@ func TestLectures(t *testing.T) {
 			{"start": 3360, "end": 3370, "text": "Декларація академічної доброчесності."}
 		]}`
 
-	// lectures are for members only, writing needs write access
-	if code, _ := do("GET", "/api/lectures", "", ""); code != 401 {
+	// reading is public, writing needs write access
+	if code, _ := do("GET", "/api/lectures", "", ""); code != 200 {
 		t.Fatalf("anonymous list: %d", code)
+	}
+	if code, _ := do("POST", "/api/lectures", "", lecture); code != 401 {
+		t.Fatalf("anonymous upload: %d", code)
 	}
 	if code, _ := do("POST", "/api/lectures", reader, lecture); code != 403 {
 		t.Fatalf("read-only upload: %d", code)
@@ -97,7 +100,7 @@ func TestLectures(t *testing.T) {
 		t.Fatalf("fallback search: %s", out)
 	}
 
-	// editing the summary keeps the transcript; the public change log hides contents
+	// editing the summary keeps the transcript
 	edit := `{"course_id": 2, "date": "2026-10-23", "title": "Засідання аспірантів", "summary": "Тема до 20.11 [08:00]", "duration_s": 3989,
 		"video_url": "https://www.youtube.com/watch?v=cX087zK25n8"}`
 	if code, out := do("PUT", fmt.Sprintf("/api/lectures/%d", created.ID), writer, edit); code != 200 {
@@ -109,10 +112,6 @@ func TestLectures(t *testing.T) {
 	l, _ := st.GetLecture(ctx, created.ID)
 	if l.Summary != "Тема до 20.11 [08:00]" || l.Segments != 3 {
 		t.Fatalf("after edit: %+v", l)
-	}
-	_, out = do("GET", "/api/changes", "", "")
-	if strings.Contains(string(out), "20.11") || !strings.Contains(string(out), "Засідання аспірантів") {
-		t.Fatalf("change log leaks lecture contents: %s", out)
 	}
 
 	// MCP: read tools for any key, update_lecture needs write access

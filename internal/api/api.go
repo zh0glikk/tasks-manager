@@ -28,7 +28,6 @@ type API struct {
 	store *store.Store
 	auth  keyauth.Verifier
 	lim   *ratelimit.Limiter
-	open  bool
 }
 
 type Options struct {
@@ -39,11 +38,11 @@ type Options struct {
 	BotUsername func() string
 }
 
-// New builds the HTTP handler. Reads are public except lectures, which need any
-// bot-issued key; writes need a key with write access unless opts.Open is set.
+// New builds the HTTP handler. Reads are public; writes need a bot-issued key
+// with write access unless opts.Open is set.
 func New(s *store.Store, static fs.FS, opts Options) http.Handler {
 	lim := ratelimit.New(writesPerIP, writesInterval)
-	a := &API{store: s, auth: opts.Auth, lim: lim, open: opts.Open}
+	a := &API{store: s, auth: opts.Auth, lim: lim}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
@@ -235,42 +234,21 @@ func (a *API) delete(entity string) http.HandlerFunc {
 	}
 }
 
-// ---- lectures (members only) ----
-
-// member lets the request through with any valid key, read-only included.
-func (a *API) member(w http.ResponseWriter, r *http.Request) bool {
-	if a.open {
-		return true
-	}
-	if _, status, msg := authenticate(r, a.auth); status != 0 {
-		if _, ok := keyauth.Bearer(r); !ok {
-			msg = "записи лекцій бачать лише учасники групи: увійди з ключем із Telegram-бота"
-		}
-		writeJSON(w, status, map[string]any{"error": msg, "login_required": status == http.StatusUnauthorized})
-		return false
-	}
-	return true
-}
+// ---- lectures ----
 
 func (a *API) listLectures(w http.ResponseWriter, r *http.Request) {
-	if !a.member(w, r) {
-		return
-	}
 	v, err := a.store.ListLectures(r.Context(), int64Param(r, "course_id"))
 	respond(w, v, err)
 }
 
 func (a *API) searchLectures(w http.ResponseWriter, r *http.Request) {
-	if !a.member(w, r) {
-		return
-	}
 	v, err := a.store.SearchSegments(r.Context(), r.URL.Query().Get("q"), int64Param(r, "course_id"), intParam(r, "limit", 50, 200))
 	respond(w, v, err)
 }
 
 func (a *API) getLecture(w http.ResponseWriter, r *http.Request) {
 	var id int64
-	if !a.member(w, r) || !pathID(w, r, &id) {
+	if !pathID(w, r, &id) {
 		return
 	}
 	l, err := a.store.GetLecture(r.Context(), id)
@@ -308,12 +286,6 @@ func (a *API) updateLecture(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) listChanges(w http.ResponseWriter, r *http.Request) {
 	v, err := a.store.ListChanges(r.Context(), intParam(r, "limit", 50, 200))
-	// the change log is public, lecture contents are not
-	for i := range v {
-		if v[i].Entity == store.EntityLecture {
-			v[i].Before, v[i].After = nil, nil
-		}
-	}
 	respond(w, v, err)
 }
 

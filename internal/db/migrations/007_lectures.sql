@@ -1,4 +1,4 @@
--- recorded classes and meetings; readable only with a key
+-- recorded classes and meetings
 create table lectures (
     id         bigserial primary key,
     event_id   bigint references events (id),  -- the class in the calendar, if any
