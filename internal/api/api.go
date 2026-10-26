@@ -243,6 +243,9 @@ func (a *API) member(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if _, status, msg := authenticate(r, a.auth); status != 0 {
+		if _, ok := keyauth.Bearer(r); !ok {
+			msg = "записи лекцій бачать лише учасники групи: увійди з ключем із Telegram-бота"
+		}
 		writeJSON(w, status, map[string]any{"error": msg, "login_required": status == http.StatusUnauthorized})
 		return false
 	}
